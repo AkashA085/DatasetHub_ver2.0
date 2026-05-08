@@ -1,0 +1,11 @@
+============================================================
+YOLOv8 INFERENCE RESULTS
+============================================================
+Model: d:\datasethub\datasethub_storage\training\jobs\eeb8a4cc-84b7-433c-a496-d68573b511b3\runs\train\weights\best.pt
+Image: d:\datasethub\datasethub_storage\training\jobs\temp\upload_d2d4e91e-b50f-4c0b-8a72-f65bf387a77c.jpg
+Confidence Threshold: 0.1
+Detections: 1
+
+Detection 1: class_0 (67.01%)
+  Coordinates: (469, 300) to (657, 532)
+

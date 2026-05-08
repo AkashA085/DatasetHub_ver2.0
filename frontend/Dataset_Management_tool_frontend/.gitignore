@@ -1,0 +1,27 @@
+<<<<<<< HEAD
+node_modules/
+dist/
+.env
+.vite/
+=======
+venv/
+.env
+
+# Data storage
+app/storage/
+exports/
+processed/
+uploads/
+analysis/
+
+# Binary files
+*.zip
+*.tar.gz
+*.csv
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+>>>>>>> 23e9a7e1a5035894868b5559b83e62a7d9086933

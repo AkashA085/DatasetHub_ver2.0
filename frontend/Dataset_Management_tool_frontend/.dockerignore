@@ -1,0 +1,20 @@
+<<<<<<< HEAD
+node_modules
+dist
+.git
+.gitignore
+npm-debug.log
+=======
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+.gitignore
+.env
+dataset_management.db
+>>>>>>> 23e9a7e1a5035894868b5559b83e62a7d9086933

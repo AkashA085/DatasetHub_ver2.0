@@ -1,0 +1,157 @@
+.augmentation-page {
+    padding: var(--spacing-lg) 0;
+}
+
+.augmentation-form {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.form-section {
+    padding: var(--spacing-xl);
+    margin-bottom: var(--spacing-lg);
+}
+
+.form-section h3 {
+    margin-bottom: var(--spacing-md);
+    color: var(--text-primary);
+    font-size: var(--font-size-xl);
+}
+
+.form-section small {
+    display: block;
+    margin-top: var(--spacing-xs);
+}
+
+.augmentation-options {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--spacing-md);
+}
+
+.option-card {
+    padding: var(--spacing-md);
+    background: var(--glass-bg);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+}
+
+.option-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-md);
+}
+
+.option-header svg {
+    font-size: var(--font-size-xl);
+    color: var(--primary);
+}
+
+.option-header h4 {
+    color: var(--text-primary);
+    font-size: var(--font-size-base);
+    font-weight: 600;
+}
+
+.option-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    cursor: pointer;
+}
+
+.checkbox-label span {
+    user-select: none;
+}
+
+input[type="range"] {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: var(--radius-sm);
+    outline: none;
+    padding: 0;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    background: linear-gradient(135deg, var(--primary), var(--secondary));
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: linear-gradient(135deg, var(--primary), var(--secondary));
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+    box-shadow: var(--shadow-sm);
+}
+
+.range-value {
+    text-align: center;
+    color: var(--primary);
+    font-weight: 600;
+    font-size: var(--font-size-sm);
+}
+
+.btn-large {
+    width: 100%;
+    padding: var(--spacing-md) var(--spacing-lg);
+    font-size: var(--font-size-lg);
+    margin-top: var(--spacing-lg);
+}
+
+.success-card {
+    text-align: center;
+    padding: var(--spacing-xl);
+    max-width: 500px;
+    margin: var(--spacing-xl) auto;
+}
+
+.success-icon {
+    font-size: 4rem;
+    color: var(--primary);
+    margin-bottom: var(--spacing-md);
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.8;
+        transform: scale(1.1);
+    }
+}
+
+@media (max-width: 768px) {
+    .augmentation-options {
+        grid-template-columns: 1fr;
+    }
+}

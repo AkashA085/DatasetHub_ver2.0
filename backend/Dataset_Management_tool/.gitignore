@@ -1,0 +1,20 @@
+venv/
+.env
+
+# Data storage
+app/storage/
+exports/
+processed/
+uploads/
+analysis/
+
+# Binary files
+*.zip
+*.tar.gz
+*.csv
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class

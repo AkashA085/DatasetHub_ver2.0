@@ -1,0 +1,274 @@
+.training-page {
+    padding: 20px 0;
+}
+
+.training-header {
+    margin-bottom: 16px;
+}
+
+.training-header h1 {
+    margin-bottom: 4px;
+    font-size: 34px;
+}
+
+.training-header p {
+    color: var(--text-secondary);
+}
+
+.training-notice {
+    margin-bottom: 12px;
+    background: rgba(60, 180, 120, 0.2);
+    border: 1px solid rgba(60, 180, 120, 0.35);
+    color: #b4efc8;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+
+.training-layout {
+    display: grid;
+    grid-template-columns: 360px 360px 1fr;
+    gap: 16px;
+}
+
+.training-panel {
+    background: #f7f8fb;
+    border: 1px solid #e2e6f0;
+    border-radius: 12px;
+    padding: 12px;
+}
+
+.training-panel h3 {
+    margin-bottom: 12px;
+    color: #1f2532;
+}
+
+.training-panel label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #33405c;
+    margin-bottom: 6px;
+}
+
+.training-panel select,
+.training-panel input {
+    width: 100%;
+    margin-bottom: 12px;
+}
+
+.training-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.training-panel-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.training-empty {
+    background: #fff;
+    border: 1px dashed #d2d9ea;
+    border-radius: 10px;
+    padding: 14px;
+    color: #6b7280;
+}
+
+.job-list {
+    display: grid;
+    gap: 10px;
+    max-height: 640px;
+    overflow: auto;
+}
+
+.job-item {
+    background: #fff;
+    border: 1px solid #dce2ef;
+    border-radius: 10px;
+    padding: 10px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.job-item.active {
+    border-color: #2f7af9;
+    box-shadow: 0 0 0 2px rgba(47, 122, 249, 0.12);
+}
+
+.job-item-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: #6b7280;
+    margin-bottom: 6px;
+}
+
+.job-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.job-item-cancel {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #f8d7da;
+    border: 1px solid #f5c2c7;
+    color: #842029;
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.job-item-cancel:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.job-item-cancel svg {
+    height: 14px;
+    width: 14px;
+}
+
+.job-item-id {
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.job-item-dataset {
+    font-size: 13px;
+    color: #4b5563;
+}
+
+.job-status {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: capitalize;
+}
+
+.job-status.queued,
+.job-status.preparing {
+    background: #fff7e6;
+    color: #b26a00;
+}
+
+.job-status.running {
+    background: #e7f2ff;
+    color: #1e5fbf;
+}
+
+.job-status.completed {
+    background: #e7faee;
+    color: #187746;
+}
+
+.job-status.failed {
+    background: #ffe9e9;
+    color: #b12a2a;
+}
+
+.job-status.cancelling {
+    background: #fff5e5;
+    color: #b37500;
+}
+
+.job-detail-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.small-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: #111827;
+    cursor: pointer;
+}
+
+.small-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.job-detail p {
+    margin-bottom: 8px;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.metric-card {
+    background: #fff;
+    border: 1px solid #dbe1ef;
+    border-radius: 10px;
+    padding: 10px;
+}
+
+.metric-card span {
+    display: block;
+    font-size: 12px;
+    color: #6b7280;
+    margin-bottom: 4px;
+}
+
+.metric-card strong {
+    font-size: 16px;
+}
+
+.artifact-block,
+.log-block {
+    margin-top: 12px;
+}
+
+.artifact-block h4,
+.log-block h4 {
+    margin-bottom: 8px;
+}
+
+.job-error {
+    background: #ffe9e9;
+    border: 1px solid #f3b4b4;
+    color: #8d1f1f;
+    border-radius: 10px;
+    padding: 10px;
+    margin-top: 12px;
+}
+
+.log-block pre {
+    background: #0f1726;
+    color: #cce0ff;
+    border-radius: 10px;
+    padding: 10px;
+    max-height: 360px;
+    overflow: auto;
+    font-size: 12px;
+}
+
+@media (max-width: 1500px) {
+    .training-layout {
+        grid-template-columns: 1fr;
+    }
+}
