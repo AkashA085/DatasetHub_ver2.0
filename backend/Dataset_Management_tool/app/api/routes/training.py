@@ -24,6 +24,423 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db, Dataset, Image, ClassDistribution, TrainingJob
 from app.utils.file_utils import STORAGE_ROOT, PROCESSED_DIR
 
+# ── 3rd-party ──────────────────────────────────────────────────────────────────
+import cv2
+import numpy as np
+import torch
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import mlflow
+from ultralytics import YOLO
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADVANCED TRAINING CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_training_cfg(params: Dict[str, Any], dataset_path: str, data_yaml: str) -> Dict[str, Any]:
+    """Generate CFG dict from API parameters."""
+    return dict(
+        # ── Camera / Input ────────────────────────────────────────────────────────
+        cam_w           = 1280,
+        cam_h           = 720,
+        imgsz           = params.get("image_size", 640),
+        # ── Model ─────────────────────────────────────────────────────────────────
+        model           = params.get("model", "yolov8n.pt"),
+        nc              = 1,  # Will be updated based on dataset
+        class_names     = ["drone"],  # Will be updated based on dataset
+        # ── Dataset ───────────────────────────────────────────────────────────────
+        dataset_root    = dataset_path,
+        data_yaml       = data_yaml,
+        # ── Training — tuned for RTX 5070 Ti ─────────────────────────────────────
+        epochs          = params.get("epochs", 100),
+        batch           = params.get("batch_size", 16),
+        workers         = 16,
+        device          = params.get("device", "0"),
+        optimizer       = params.get("optimizer", "AdamW"),
+        lr0             = params.get("learning_rate", 0.0001),
+        lrf             = 0.005,
+        momentum        = 0.937,
+        weight_decay    = 5e-4,
+        warmup_epochs   = 5,
+        warmup_bias_lr  = 0.1,
+        cos_lr          = True,
+        amp             = True,
+        cache           = "disk",
+        patience        = 60,
+        save_period     = 25,
+        # ── Loss weights (small fast objects need strong box loss) ────────────────
+        box             = 9.5,
+        cls             = 0.3,
+        dfl             = 1.5,
+        # ── Small-object tricks ───────────────────────────────────────────────────
+        multi_scale     = False,
+        overlap_mask    = False,
+        # ── Output ────────────────────────────────────────────────────────────────
+        project         = str(TRAINING_JOBS_DIR / params.get("job_id", "unknown") / "runs"),
+        name            = params.get("run_name", f"exp_{datetime.now().strftime('%Y%m%d_%H%M')}"),
+        # ── MLflow ────────────────────────────────────────────────────────────────
+        mlflow_uri      = params.get("mlflow_tracking_uri", "mlruns"),
+        mlflow_exp      = params.get("experiment_name", "Drone_vs_Drone_Detection"),
+        # ── Jetson Export ─────────────────────────────────────────────────────────
+        jetson_format   = "engine",
+        jetson_fp16     = True,
+        jetson_imgsz    = 640,
+        jetson_workspace= 4,
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ALBUMENTATIONS AUGMENTATION PIPELINES
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_train_transform() -> A.Compose:
+    bp = A.BboxParams(
+        format         = "yolo",
+        label_fields   = ["class_labels"],
+        min_area       = 9,
+        min_visibility = 0.20,
+    )
+    return A.Compose([
+        # ── A. MOTION BLUR ─────────────────────────────────────────────────
+        A.OneOf([
+            A.MotionBlur(blur_limit=(7, 25), p=1.0),
+            A.ZoomBlur(max_factor=(1.0, 1.10), p=1.0),
+            A.Blur(blur_limit=(3, 7), p=1.0),
+        ], p=0.65),
+        # ── B. NIGHT / LOW-LIGHT ───────────────────────────────────────────
+        A.OneOf([
+            A.Compose([
+                A.RandomBrightnessContrast(
+                    brightness_limit=(-0.65, -0.25),
+                    contrast_limit=(0.1, 0.5), p=1.0),
+                A.RandomGamma(gamma_limit=(20, 70), p=1.0),
+            ]),
+            A.RandomBrightnessContrast(
+                brightness_limit=(-0.35, -0.05),
+                contrast_limit=(-0.1, 0.3), p=1.0),
+            A.Compose([
+                A.ToGray(p=1.0),
+                A.CLAHE(clip_limit=6.0, tile_grid_size=(4, 4), p=1.0),
+                A.RandomBrightnessContrast(
+                    brightness_limit=(-0.4, 0.0),
+                    contrast_limit=(0.2, 0.5), p=1.0),
+            ]),
+            A.Compose([
+                A.RandomBrightnessContrast(
+                    brightness_limit=(-0.5, -0.1),
+                    contrast_limit=(0.0, 0.4), p=1.0),
+                A.HueSaturationValue(
+                    hue_shift_limit=15,
+                    sat_shift_limit=(-40, -10),
+                    val_shift_limit=(-20, 10), p=1.0),
+            ]),
+        ], p=0.55),
+        # ── C. SENSOR NOISE ────────────────────────────────────────────────
+        A.OneOf([
+            A.GaussNoise(std_range=(0.01, 0.05), mean_range=(0, 0), p=1.0),
+            A.ISONoise(color_shift=(0.01, 0.06), intensity=(0.15, 0.55), p=1.0),
+            A.MultiplicativeNoise(
+                multiplier=(0.80, 1.20), per_channel=True,
+                elementwise=True, p=1.0),
+        ], p=0.55),
+        # ── D. ATMOSPHERIC (altitude weather) ─────────────────────────────
+        A.OneOf([
+            A.RandomFog(
+                fog_coef_range=(0.04, 0.25),
+                alpha_coef=0.10, p=1.0),
+            A.RandomRain(
+                slant_range=(-15, 15),
+                drop_length=15, drop_width=1,
+                drop_color=(180, 180, 180),
+                blur_value=3, brightness_coefficient=0.85,
+                rain_type="drizzle", p=1.0),
+            A.RandomSunFlare(
+                flare_roi=(0, 0, 1, 0.4),
+                angle_range=(0.0, 1.0),
+                num_flare_circles_range=(2, 5),
+                src_radius=100, src_color=(255, 220, 160), p=1.0),
+            A.RandomSnow(
+                snow_point_range=(0.02, 0.12),
+                brightness_coeff=1.5, p=1.0),
+        ], p=0.25),
+        # ── E. GEOMETRIC (moving platform) ────────────────────────────────
+        A.Rotate(limit=20, border_mode=cv2.BORDER_CONSTANT,
+                 fill=114, p=0.45),
+        A.Affine(
+            translate_percent={"x": (-0.06, 0.06), "y": (-0.06, 0.06)},
+            shear=(-6, 6), p=0.35),
+        A.Perspective(scale=(0.02, 0.07), p=0.30),
+        A.HorizontalFlip(p=0.50),
+        A.VerticalFlip(p=0.10),
+        # ── F. STREAM / ENCODING ARTEFACTS ────────────────────────────────
+        A.ImageCompression(quality_range=(40, 90), p=0.30),
+        A.Defocus(radius=(1, 4), alias_blur=(0.1, 0.5), p=0.15),
+        # ── G. OCCLUSION (partial cloud, bird, rotor wash) ─────────────────
+        A.CoarseDropout(
+            num_holes_range=(1, 8), hole_height_range=(8, 40), hole_width_range=(8, 40),
+            fill=114, p=0.20),
+        # ── H. COLOUR JITTER ───────────────────────────────────────────────
+        A.HueSaturationValue(
+            hue_shift_limit=12, sat_shift_limit=35, val_shift_limit=25,
+            p=0.35),
+        A.RGBShift(r_shift_limit=15, g_shift_limit=10,
+                   b_shift_limit=15, p=0.25),
+    ], bbox_params=bp)
+
+
+def build_val_transform() -> A.Compose:
+    bp = A.BboxParams(
+        format       = "yolo",
+        label_fields = ["class_labels"],
+        min_area     = 4,
+        min_visibility = 0.1,
+    )
+    return A.Compose([
+        A.LongestMaxSize(max_size=640),
+        A.PadIfNeeded(
+            min_height=640, min_width=640,
+            border_mode=cv2.BORDER_CONSTANT, fill=114),
+    ], bbox_params=bp)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AUGMENTED DATASET WRITER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_augmented_split(
+    src_img_dir : str,
+    src_lbl_dir : str,
+    dst_img_dir : str,
+    dst_lbl_dir : str,
+    multiplier  : int = 4,
+    mode        : str = "train",
+) -> int:
+    transform = build_train_transform() if mode == "train" else build_val_transform()
+    imgs = sorted(Path(src_img_dir).glob("*.*"))
+    Path(dst_img_dir).mkdir(parents=True, exist_ok=True)
+    Path(dst_lbl_dir).mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    for img_path in imgs:
+        lbl_path = Path(src_lbl_dir) / (img_path.stem + ".txt")
+        if not lbl_path.exists():
+            continue
+
+        image = cv2.imread(str(img_path))
+        if image is None:
+            continue
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # parse YOLO labels
+        bboxes, classes = [], []
+        for line in lbl_path.read_text().strip().splitlines():
+            p = line.split()
+            if len(p) < 5:
+                continue
+            classes.append(int(p[0]))
+            bboxes.append([min(max(float(x), 0.0), 1.0) for x in p[1:5]])
+
+        # always copy original
+        versions = [("orig", image, bboxes, classes)]
+        for i in range(multiplier):
+            try:
+                aug = transform(image=image, bboxes=bboxes, class_labels=classes)
+                versions.append((f"a{i:02d}", aug["image"],
+                                 aug["bboxes"], aug["class_labels"]))
+            except Exception:
+                pass
+
+        for tag, aug_img, aug_boxes, aug_cls in versions:
+            stem   = f"{img_path.stem}_{tag}"
+            out_im = Path(dst_img_dir) / f"{stem}.jpg"
+            out_lb = Path(dst_lbl_dir) / f"{stem}.txt"
+            cv2.imwrite(str(out_im),
+                        cv2.cvtColor(aug_img, cv2.COLOR_RGB2BGR),
+                        [cv2.IMWRITE_JPEG_QUALITY, 95])
+            with open(out_lb, "w") as f:
+                for cls_id, box in zip(aug_cls, aug_boxes):
+                    f.write(f"{cls_id} {box[0]:.6f} {box[1]:.6f} "
+                            f"{box[2]:.6f} {box[3]:.6f}\n")
+            written += 1
+
+    return written
+
+
+def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
+    root     = Path(cfg["dataset_root"])
+    aug_root = root / "augmented"
+
+    # train: augment
+    write_augmented_split(
+        src_img_dir = str(root / "images" / "train"),
+        src_lbl_dir = str(root / "labels" / "train"),
+        dst_img_dir = str(aug_root / "images" / "train"),
+        dst_lbl_dir = str(aug_root / "labels" / "train"),
+        multiplier  = multiplier,
+        mode        = "train",
+    )
+    # val/test: copy only
+    import os
+    for split in ["val", "test"]:
+        for sub in ["images", "labels"]:
+            src = root / sub / split
+            dst = aug_root / sub / split
+            if src.exists():
+                shutil.copytree(str(src), str(dst), dirs_exist_ok=True, copy_function=os.symlink)
+
+    # write new data.yaml
+    new_yaml = aug_root / "drone_data.yaml"
+    with open(cfg["data_yaml"]) as f:
+        orig = yaml.safe_load(f)
+    orig["path"] = str(aug_root.resolve())
+    with open(new_yaml, "w") as f:
+        yaml.dump(orig, f, default_flow_style=False)
+
+    return str(new_yaml)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MLflow CALLBACK
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DroneMLflowCallback:
+    def __init__(self, run, cfg: dict):
+        self.run = run
+        self.cfg = cfg
+        self.best_map50 = 0.0
+
+    def on_train_epoch_end(self, trainer):
+        epoch = trainer.epoch
+        # losses
+        for k, v in trainer.label_loss_items(trainer.tloss, prefix="train").items():
+            try: mlflow.log_metric(f"loss/{k}", float(v), step=epoch)
+            except: pass
+        # val metrics
+        for k, v in trainer.metrics.items():
+            try:
+                key = k.replace("(B)", "").strip()
+                mlflow.log_metric(f"val/{key}", float(v), step=epoch)
+                if "mAP50" in key and float(v) > self.best_map50:
+                    self.best_map50 = float(v)
+                    mlflow.log_metric("best_mAP50", self.best_map50, step=epoch)
+            except: pass
+        # learning rate
+        for i, lr in enumerate(trainer.scheduler.get_last_lr()):
+            mlflow.log_metric(f"lr/pg{i}", lr, step=epoch)
+
+    def on_train_end(self, trainer):
+        save_dir = Path(trainer.save_dir)
+        # weights
+        for w in ["best.pt", "last.pt"]:
+            p = save_dir / "weights" / w
+            if p.exists():
+                mlflow.log_artifact(str(p), artifact_path="weights")
+        # plots
+        for f in save_dir.glob("*.png"):
+            mlflow.log_artifact(str(f), artifact_path="plots")
+        for f in save_dir.glob("*.csv"):
+            mlflow.log_artifact(str(f), artifact_path="results")
+        # final metrics
+        for k, v in trainer.metrics.items():
+            try: mlflow.log_metric(f"final/{k.replace('(B)','').strip()}", float(v))
+            except: pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADVANCED TRAINING FUNCTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: int = 4, job: Dict[str, Any] = None, existing_mlflow_run=None):
+    """Advanced YOLO training with Albumentations and MLflow."""
+    if cfg is None:
+        cfg = get_training_cfg({}, "", "")
+
+    # ── optional: pre-generate augmented dataset on disk ─────────────────────
+    active_yaml = cfg["data_yaml"]
+    if use_albumentations:
+        _append_log(job, f"Building Albumentations dataset (×{aug_mult})…")
+        active_yaml = build_augmented_dataset(cfg, multiplier=aug_mult)
+    else:
+        _append_log(job, "Skipping Albumentations pre-augmentation (using YOLO built-in)")
+
+    # ── MLflow ────────────────────────────────────────────────────────────────
+    if existing_mlflow_run is None:
+        mlflow.set_tracking_uri(cfg["mlflow_uri"])
+        mlflow.set_experiment(cfg["mlflow_exp"])
+        mlflow_run_context = mlflow.start_run(run_name=cfg["name"])
+        run = mlflow_run_context.__enter__()
+    else:
+        run = existing_mlflow_run
+
+    try:
+        # log full config
+        loggable = {k: str(v) for k, v in cfg.items()
+                    if not isinstance(v, (list, dict))}
+        loggable["aug_multiplier"]   = str(aug_mult)
+        loggable["use_albumentations"] = str(use_albumentations)
+        loggable["cuda_device"]      = torch.cuda.get_device_name(0) \
+                                       if torch.cuda.is_available() else "cpu"
+        loggable["torch_version"]    = torch.__version__
+        mlflow.log_params(loggable)
+        mlflow.log_artifact(active_yaml, artifact_path="dataset")
+
+        # ── load model ────────────────────────────────────────────────────────
+        model = YOLO(cfg["model"])
+
+        # ── attach MLflow callback ────────────────────────────────────────────
+        cb = DroneMLflowCallback(run, cfg)
+        model.add_callback("on_train_epoch_end", cb.on_train_epoch_end)
+        model.add_callback("on_train_end",       cb.on_train_end)
+
+        # ── YOLO train ────────────────────────────────────────────────────────
+        results = model.train(
+            data            = active_yaml,
+            epochs          = cfg["epochs"],
+            imgsz           = cfg["imgsz"],
+            batch           = cfg["batch"],
+            device          = cfg["device"],
+            optimizer       = cfg["optimizer"],
+            lr0             = cfg["lr0"],
+            lrf             = cfg["lrf"],
+            momentum        = cfg["momentum"],
+            weight_decay    = cfg["weight_decay"],
+            warmup_epochs   = cfg["warmup_epochs"],
+            warmup_bias_lr  = cfg["warmup_bias_lr"],
+            cos_lr          = cfg["cos_lr"],
+            amp             = cfg["amp"],
+            cache           = cfg["cache"],
+            workers         = cfg["workers"],
+            box             = cfg["box"],
+            cls             = cfg["cls"],
+            dfl             = cfg["dfl"],
+            multi_scale     = cfg["multi_scale"],
+            patience        = cfg["patience"],
+            save_period     = cfg["save_period"],
+            project         = cfg["project"],
+            name            = cfg["name"],
+            exist_ok        = True,
+            verbose         = True,
+            # ── YOLO built-in augmentation (adds diversity on top of Albumentations)
+            mosaic          = 1.0,
+            mixup           = 0.15,
+            copy_paste      = 0.10,
+            hsv_h           = 0.015,
+            hsv_s           = 0.4,
+            hsv_v           = 0.3,
+            degrees         = 10.0,
+            translate       = 0.1,
+            scale           = 0.5,
+            flipud          = 0.1,
+            fliplr          = 0.5,
+            perspective    = 0.0005,
+        )
+
+    finally:
+        if existing_mlflow_run is None:
+            mlflow_run_context.__exit__(None, None, None)
+
+    return results
+
+
 router = APIRouter(prefix="/train", tags=
                    ["Training"])
 
@@ -47,7 +464,7 @@ class TrainingStartRequest(BaseModel):
     image_size: int = Field(640, ge=128, le=2048)
     learning_rate: float = Field(0.01, gt=0.0, le=1.0)
     optimizer: str = "auto"
-    device: str = "cpu"
+    device: str = "0"
     val_split: float = Field(0.2, ge=0.05, le=0.4)
     test_split: float = Field(0.1, ge=0.0, le=0.4)
     seed: int = 42
@@ -87,6 +504,23 @@ class TrainingJobListResponse(BaseModel):
     jobs: List[TrainingJobResponse]
 
 
+class GPUDeviceInfo(BaseModel):
+    """Information about a single GPU device."""
+    device_id: str
+    device_name: str
+    total_memory_gb: float
+    available: bool
+
+
+class DeviceDetectionResponse(BaseModel):
+    """Response with available devices and recommended device."""
+    cuda_available: bool
+    device_count: int
+    devices: List[GPUDeviceInfo]
+    recommended_device: str  # "auto", "cpu", or GPU ID like "0"
+    message: str
+
+
 def _append_log(job: Dict[str, Any], message: str) -> None:
     ts = datetime.utcnow().strftime("%H:%M:%S")
     job["logs"].append(f"[{ts}] {message}")
@@ -97,12 +531,25 @@ def _append_log(job: Dict[str, Any], message: str) -> None:
 def _save_job_to_db(job: Dict[str, Any], db: Session) -> None:
     """Persist job status to database."""
     try:
+        # Helper to convert ISO string to datetime if needed
+        def to_datetime(val):
+            if val is None:
+                return None
+            if isinstance(val, datetime):
+                return val
+            if isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val)
+                except (ValueError, TypeError):
+                    return None
+            return None
+        
         existing = db.query(TrainingJob).filter(TrainingJob.id == job["job_id"]).first()
         if existing:
-            # Update existing job
+            # Update existing job - convert ISO strings to datetime objects
             existing.status = job["status"]
-            existing.started_at = job.get("started_at")
-            existing.finished_at = job.get("finished_at")
+            existing.started_at = to_datetime(job.get("started_at"))
+            existing.finished_at = to_datetime(job.get("finished_at"))
             existing.metrics = job.get("metrics")
             existing.artifacts = job.get("artifacts")
             existing.mlflow = job.get("mlflow")
@@ -115,9 +562,9 @@ def _save_job_to_db(job: Dict[str, Any], db: Session) -> None:
                 dataset_id=job["dataset_id"],
                 status=job["status"],
                 params=job["params"],
-                created_at=datetime.fromisoformat(job["created_at"]),
-                started_at=datetime.fromisoformat(job["started_at"]) if job.get("started_at") else None,
-                finished_at=datetime.fromisoformat(job["finished_at"]) if job.get("finished_at") else None,
+                created_at=to_datetime(job["created_at"]),
+                started_at=to_datetime(job.get("started_at")),
+                finished_at=to_datetime(job.get("finished_at")),
                 metrics=job.get("metrics"),
                 artifacts=job.get("artifacts"),
                 mlflow=job.get("mlflow"),
@@ -327,48 +774,63 @@ def _log_params_chunked(mlflow_module: Any, params: Dict[str, Any], chunk_size: 
 def _resolve_device(device_value: Any) -> str:
     """Resolve device with CUDA validation and optimization."""
     raw = str(device_value or "").strip().lower()
-    if raw in {"", "none"}:
-        return "cpu"
-    if raw != "auto":
-        return str(device_value)
     try:
         import torch  # type: ignore
-        if torch.cuda.is_available():
-            # Validate CUDA is properly configured
-            try:
-                torch.cuda.init()
-                torch.cuda.empty_cache()
-                device_count = torch.cuda.device_count()
-                device_name = torch.cuda.get_device_name(0)
-                device_props = torch.cuda.get_device_properties(0)
-                total_memory = device_props.total_memory / (1024**3)  # Convert to GB
-                return "0"
-            except Exception as cuda_error:
-                print(f"⚠️  CUDA error: {cuda_error}. Falling back to CPU.")
+        cuda_available = torch.cuda.is_available()
+        if raw in {"", "none"}:
+            return "0" if cuda_available else "cpu"
+        if raw == "auto":
+            return "0" if cuda_available else "cpu"
+        if raw in {"cpu"}:
+            return "cpu"
+
+        # Support explicit device IDs and cuda-style values.
+        if raw.startswith("cuda"):
+            if not cuda_available:
                 return "cpu"
+            if raw == "cuda":
+                return "0" if torch.cuda.device_count() > 0 else "cpu"
+            try:
+                _, idx = raw.split(":", 1)
+                idx = idx.strip()
+                if idx.isdigit() and int(idx) < torch.cuda.device_count():
+                    return str(int(idx))
+            except Exception:
+                return "cpu"
+        if raw.isdigit():
+            if not cuda_available:
+                return "cpu"
+            idx = int(raw)
+            if idx >= 0 and idx < torch.cuda.device_count():
+                return str(idx)
+            return "cpu"
+
         return "cpu"
     except Exception:
         return "cpu"
 
 
 def _validate_and_setup_gpu(device: str, job: Dict[str, Any]) -> None:
-    """Validate GPU setup and log device information."""
+    """Validate GPU setup and log device information. Enforces GPU usage when available."""
     if device.lower() == "cpu":
-        _append_log(job, "⚠️  Training will run on CPU - this will be VERY SLOW")
+        _append_log(job, "⚠️  ⚠️  ⚠️  WARNING: Training will run on CPU - this will be VERY SLOW ⚠️  ⚠️  ⚠️")
         return
     
     try:
         import torch  # type: ignore
-        _append_log(job, f"✓ CUDA Available: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
+            _append_log(job, f"✓✓✓ USING GPU FOR TRAINING ✓✓✓")
+            _append_log(job, f"✓ CUDA Available: {torch.cuda.is_available()}")
             _append_log(job, f"✓ GPU Device Count: {device_count}")
             for i in range(device_count):
                 props = torch.cuda.get_device_properties(i)
                 total_mem = props.total_memory / (1024**3)
                 _append_log(job, f"  GPU {i}: {props.name} ({total_mem:.1f}GB)")
             torch.cuda.empty_cache()
-            _append_log(job, "✓ GPU memory cleared and ready")
+            _append_log(job, "✓ GPU memory cleared and ready for training")
+        else:
+            _append_log(job, f"⚠️  GPU requested (device={device}) but CUDA not available - falling back to CPU (VERY SLOW)")
     except Exception as e:
         _append_log(job, f"⚠️  GPU validation warning: {str(e)}")
 
@@ -432,20 +894,16 @@ def _prepare_yolo_dataset(
     """
     _append_log(job, f"Preparing dataset from uploaded data for dataset_id={dataset_id}")
     
-    # Query ONLY images that have labels (real labeled data)
+    # Query ONLY required columns for images that have labels (real labeled data) to save RAM
     # has_label field was set during upload based on matching label files
-    images = db.query(Image).filter(
+    images = db.query(Image.file_path, Image.file_name).filter(
         Image.dataset_id == dataset_id,
         Image.has_label == True  # CRITICAL: Only real labeled images
     ).all()
     
     if not images:
-        all_images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
-        _append_log(job, f"ERROR: No labeled images found. Total images: {len(all_images)}")
-        if all_images:
-            unlabeled = [img for img in all_images if not img.file_name or not Path(img.file_path).exists()]
-            if unlabeled:
-                _append_log(job, f"Found {len(unlabeled)} images without labels or inaccessible files")
+        all_images_count = db.query(Image.id).filter(Image.dataset_id == dataset_id).count()
+        _append_log(job, f"ERROR: No labeled images found. Total images: {all_images_count}")
         raise ValueError(f"No labeled images found for dataset {dataset_id}. Cannot train without labels.")
 
     _append_log(job, f"Found {len(images)} labeled images for dataset")
@@ -549,20 +1007,23 @@ def _prepare_yolo_dataset(
     def copy_pairs(split_name: str, split_pairs: List[Any]) -> None:
         """Copy image/label pairs to training directory."""
         copy_count = 0
+        import os
         for img_path, lbl_path, file_name in split_pairs:
             try:
-                # Copy image
+                # Symlink image
                 dest_img = dataset_dir / split_name / "images" / file_name
-                shutil.copy2(img_path, dest_img)
+                if not dest_img.exists():
+                    os.symlink(img_path, dest_img)
                 
-                # Copy label with correct name
+                # Symlink label with correct name
                 label_name = f"{Path(file_name).stem}.txt"
                 dest_lbl = dataset_dir / split_name / "labels" / label_name
-                shutil.copy2(lbl_path, dest_lbl)
+                if not dest_lbl.exists():
+                    os.symlink(lbl_path, dest_lbl)
                 
                 copy_count += 1
             except Exception as e:
-                _append_log(job, f"ERROR copying {file_name}: {str(e)}")
+                _append_log(job, f"ERROR linking {file_name}: {str(e)}")
                 raise
         
         _append_log(job, f"Copied {copy_count} image/label pairs to {split_name} split")
@@ -680,6 +1141,10 @@ def _run_training(job_id: str) -> None:
         run_name = job["params"].get("run_name") or f"train_{job['job_id'][:8]}"
         experiment_name = job["params"].get("experiment_name", "dataset_training")
         mlflow_tracking_uri = job["params"].get("mlflow_tracking_uri")
+        if not mlflow_tracking_uri:
+            # Default to persistent storage to avoid path conflicts and host-leaked absolute paths
+            mlflow_db_path = STORAGE_ROOT / "mlflow.db"
+            mlflow_tracking_uri = f"sqlite:///{mlflow_db_path}"
 
         mlflow = None
         mlflow_client = None
@@ -761,7 +1226,7 @@ def _run_training(job_id: str) -> None:
             _save_job_to_db(job, db)
             return
 
-        _append_log(job, "Running Ultralytics YOLO training.")
+        _append_log(job, "Running advanced YOLO training with Albumentations and MLflow.")
         _save_job_to_db(job, db)
 
         try:
@@ -773,7 +1238,18 @@ def _run_training(job_id: str) -> None:
                 "Install with: pip install ultralytics"
             ) from e
 
-        model = YOLO(job["params"]["model"])
+        # Generate CFG for advanced training
+        cfg = get_training_cfg(
+            params=job["params"],
+            dataset_path=str(prepared["job_dir"] / "dataset"),
+            data_yaml=str(prepared["yaml_path"])
+        )
+        # Update class names from dataset
+        if dataset and isinstance(dataset.analysis_summary, dict):
+            custom_names = dataset.analysis_summary.get("class_names") or []
+            if custom_names:
+                cfg["class_names"] = custom_names
+                cfg["nc"] = len(custom_names)
 
         # Clear GPU memory before training
         if resolved_device != "cpu":
@@ -785,11 +1261,13 @@ def _run_training(job_id: str) -> None:
             except Exception as e:
                 _append_log(job, f"  GPU memory clear warning: {str(e)}")
 
-        # capture stdout/stderr from Ultralytics training so we can surface it
-        # in the job log and make it visible to the frontend.  Ultralytics
-        # prints progress directly to stdout, so we temporarily replace
-        # sys.stdout/sys.stderr with a small wrapper that echoes to the
-        # original stream and also appends each line to our job record.
+        # Get existing MLflow run if active
+        existing_mlflow_run = None
+        if mlflow_active and mlflow.active_run():
+            existing_mlflow_run = mlflow.active_run()
+
+        # capture stdout/stderr from training so we can surface it
+        # in the job log and make it visible to the frontend.
         import sys
 
         class _StreamInterceptor:
@@ -798,11 +1276,13 @@ def _run_training(job_id: str) -> None:
                 self.orig = orig_stream
 
             def write(self, s: str) -> None:
-                # send non-empty lines to logs
-                if s:
+                # send non-empty lines to logs, skip progress bar updates to prevent bloat
+                if s and "\r" not in s:
                     for line in s.splitlines():
                         if line.strip():
-                            _append_log(self.job, line)
+                            # skip extremely long lines just in case
+                            if len(line) < 500:
+                                _append_log(self.job, line)
                 try:
                     self.orig.write(s)
                 except Exception:
@@ -820,41 +1300,13 @@ def _run_training(job_id: str) -> None:
         sys.stdout = interceptor
         sys.stderr = interceptor
         try:
-            result = model.train(
-                data=str(prepared["yaml_path"]),
-                epochs=job["params"]["epochs"],
-                imgsz=job["params"]["image_size"],
-                batch=job["params"]["batch_size"],
-                lr0=job["params"]["learning_rate"],
-                optimizer=job["params"]["optimizer"],
-                device=resolved_device,
-                project=str(run_dir),
-                name="train",
-                exist_ok=True,
-                seed=job["params"]["seed"],
-                # GPU Optimization Parameters
-                workers=8 if resolved_device != "cpu" else 2,  # Increase workers for GPU training
-                cache=True if resolved_device != "cpu" else False,  # Cache images in RAM for faster loading on GPU
-                amp=True,  # Automatic Mixed Precision - faster GPU training
-                patience=20,  # Early stopping patience (epochs without improvement)
-                # Data Augmentation - enhanced for better model robustness
-                hsv_h=0.015,  # Image HSV-Hue augmentation
-                hsv_s=0.7,    # Image HSV-Saturation augmentation
-                hsv_v=0.4,    # Image HSV-Value augmentation
-                degrees=10.0,  # Image rotation (+/- deg)
-                translate=0.1, # Image translation (+/- fraction)
-                scale=0.5,     # Image scale (+/- gain)
-                flipud=0.0,    # Image flip up-down (probability)
-                fliplr=0.5,    # Image flip left-right (probability)
-                mosaic=1.0,    # Image mosaic (probability)
-                mixup=0.0,     # Image mixup (probability)
-                # Performance optimizations
-                close_mosaic=10,  # Disables mosaic augmentation for final 10 epochs
-                # Validation
-                val=True,
-                save_period=1,
-                # Memory optimization
-                max_det=300,  # Maximum detections per image
+            # Use advanced training with Albumentations
+            result = advanced_train(
+                cfg=cfg,
+                use_albumentations=job["params"].get("augmentation_enabled", False),
+                aug_mult=4,  # Default multiplier
+                job=job,
+                existing_mlflow_run=existing_mlflow_run
             )
         finally:
             # restore original streams in all cases
@@ -959,8 +1411,11 @@ def _run_training(job_id: str) -> None:
                     "model_stage": job["params"]["model_stage"],
                 }
                 try:
-                    mlflow.pytorch.log_model(model.model, artifact_path="model")
-                    registered_name = f"{dataset_name}_detector".replace("-", "_")
+                    from ultralytics import YOLO
+                    if best_pt.exists():
+                        trained_model = YOLO(str(best_pt))
+                        mlflow.pytorch.log_model(trained_model.model, artifact_path="model")
+                        registered_name = f"{dataset_name}_detector".replace("-", "_")
                     model_uri = f"runs:/{mlflow_run_id}/model"
                     model_version = mlflow.register_model(model_uri=model_uri, name=registered_name)
                     if job["params"].get("model_description"):
@@ -1037,6 +1492,71 @@ def _run_training(job_id: str) -> None:
         db.close()
 
 
+@router.get("/detect-devices", response_model=DeviceDetectionResponse)
+async def get_available_devices():
+    """Detect and return available computing devices."""
+    try:
+        import torch  # type: ignore
+        
+        devices = []
+        cuda_available = False
+        device_count = 0
+        recommended = "cpu"
+        
+        # Check CUDA availability
+        if torch.cuda.is_available():
+            cuda_available = True
+            try:
+                torch.cuda.init()
+                device_count = torch.cuda.device_count()
+                
+                for i in range(device_count):
+                    try:
+                        props = torch.cuda.get_device_properties(i)
+                        total_memory = props.total_memory / (1024**3)  # Convert to GB
+                        devices.append(GPUDeviceInfo(
+                            device_id=str(i),
+                            device_name=props.name,
+                            total_memory_gb=round(total_memory, 2),
+                            available=True
+                        ))
+                    except Exception:
+                        devices.append(GPUDeviceInfo(
+                            device_id=str(i),
+                            device_name=f"GPU {i}",
+                            total_memory_gb=0.0,
+                            available=False
+                        ))
+                
+                # Recommend first available GPU
+                if device_count > 0:
+                    recommended = "0"
+                    message = f"GPU detected: Using GPU 0 by default. {device_count} GPU(s) available."
+                else:
+                    message = "CUDA available but no GPU devices detected. Using CPU."
+            except Exception as e:
+                message = f"CUDA available but error detecting devices: {str(e)}. Using CPU."
+        else:
+            message = "No CUDA/GPU support detected. Training will use CPU."
+            recommended = "cpu"
+        
+        return DeviceDetectionResponse(
+            cuda_available=cuda_available,
+            device_count=device_count,
+            devices=devices,
+            recommended_device=recommended,
+            message=message
+        )
+    except Exception as e:
+        return DeviceDetectionResponse(
+            cuda_available=False,
+            device_count=0,
+            devices=[],
+            recommended_device="cpu",
+            message=f"Error detecting devices: {str(e)}. Using CPU for training."
+        )
+
+
 @router.post("/start", response_model=TrainingJobResponse)
 async def start_training(request: TrainingStartRequest, db: Session = Depends(get_db)):
     dataset = db.query(Dataset).filter(Dataset.id == request.dataset_id).first()
@@ -1090,9 +1610,12 @@ async def start_training(request: TrainingStartRequest, db: Session = Depends(ge
 
 
 @router.get("/jobs", response_model=TrainingJobListResponse)
-async def list_training_jobs(db: Session = Depends(get_db)):
+async def list_training_jobs(dataset_id: Optional[str] = None, db: Session = Depends(get_db)):
     # Get all jobs from database (most recent first)
-    jobs_db = db.query(TrainingJob).order_by(TrainingJob.created_at.desc()).all()
+    query = db.query(TrainingJob)
+    if dataset_id:
+        query = query.filter(TrainingJob.dataset_id == dataset_id)
+    jobs_db = query.order_by(TrainingJob.created_at.desc()).all()
     
     # Convert to response format
     jobs_response = []
@@ -1145,6 +1668,46 @@ async def get_training_job(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
     return TrainingJobResponse(**job)
+
+
+@router.get("/jobs/{job_id}/download")
+async def download_training_folder(job_id: str, db: Session = Depends(get_db)):
+    # Verify job exists
+    job_record = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+    if not job_record:
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        artifacts = job.get("artifacts") or {}
+    else:
+        artifacts = job_record.artifacts or {}
+
+    run_dir_str = artifacts.get("run_dir")
+    if not run_dir_str:
+        raise HTTPException(status_code=404, detail="Run directory not found. Job may not be completed.")
+
+    run_dir = Path(run_dir_str)
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Run directory does not exist on disk.")
+
+    from app.utils.file_utils import EXPORTS_DIR, create_zip_archive
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = EXPORTS_DIR / f"training_job_{job_id}.zip"
+
+    if not zip_path.exists():
+        # Zip the train directory
+        try:
+            create_zip_archive(run_dir.parent, run_dir.name, zip_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to zip training folder: {str(e)}")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=zip_path,
+        filename=f"training_{job_id}.zip",
+        media_type="application/zip"
+    )
 
 
 @router.delete("/jobs/{job_id}", response_model=TrainingJobResponse)
@@ -1226,6 +1789,41 @@ class PredictionResponse(BaseModel):
     inference_time_ms: Optional[float] = None
 
 
+def find_latest_weights(dataset_id: str) -> Optional[Path]:
+    """Find the most recent job directory for this dataset that contains a best.pt."""
+    # first look for jobs that have explicit metadata for this dataset
+    matched = []  # type: List[Path]
+    all_weights: List[Path] = []
+    if not TRAINING_JOBS_DIR.exists():
+        return None
+        
+    for job_dir in TRAINING_JOBS_DIR.iterdir():
+        if not job_dir.is_dir():
+            continue
+        weight_file = job_dir / "runs" / "train" / "weights" / "best.pt"
+        if weight_file.exists():
+            all_weights.append(weight_file)
+        meta_path = job_dir / "job_meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            m = json.load(open(meta_path, "r", encoding="utf-8"))
+        except Exception:
+            continue
+        if m.get("dataset_id") == dataset_id and weight_file.exists():
+            matched.append(weight_file)
+    if matched:
+        # return newest of the matched set
+        return max(matched, key=lambda p: p.stat().st_mtime)
+    # no matching metadata, fall back to latest available weights
+    if all_weights:
+        chosen = max(all_weights, key=lambda p: p.stat().st_mtime)
+        # log warning to stdout so developer can see potential mismatch
+        print(f"WARNING: no metadata for dataset '{dataset_id}'; using '{chosen}'")
+        return chosen
+    return None
+
+
 @router.post(
     "/predict",
     response_model=PredictionResponse,
@@ -1256,38 +1854,7 @@ async def predict_image(
             base = str(request.base_url).rstrip("/")
             image_url = f"{base}{image_url}"
 
-    # find the most recent job directory for this dataset that contains a best.pt
-    def _find_latest_weights(dataset_id: str) -> Optional[Path]:
-        # first look for jobs that have explicit metadata for this dataset
-        matched = []  # type: List[Path]
-        all_weights: List[Path] = []
-        for job_dir in TRAINING_JOBS_DIR.iterdir():
-            if not job_dir.is_dir():
-                continue
-            weight_file = job_dir / "runs" / "train" / "weights" / "best.pt"
-            if weight_file.exists():
-                all_weights.append(weight_file)
-            meta_path = job_dir / "job_meta.json"
-            if not meta_path.exists():
-                continue
-            try:
-                m = json.load(open(meta_path, "r", encoding="utf-8"))
-            except Exception:
-                continue
-            if m.get("dataset_id") == dataset_id and weight_file.exists():
-                matched.append(weight_file)
-        if matched:
-            # return newest of the matched set
-            return max(matched, key=lambda p: p.stat().st_mtime)
-        # no matching metadata, fall back to latest available weights
-        if all_weights:
-            chosen = max(all_weights, key=lambda p: p.stat().st_mtime)
-            # log warning to stdout so developer can see potential mismatch
-            print(f"WARNING: no metadata for dataset '{dataset_id}'; using '{chosen}'")
-            return chosen
-        return None
-
-    weight_path = _find_latest_weights(dataset_id)
+    weight_path = find_latest_weights(dataset_id)
     if not weight_path:
         raise HTTPException(status_code=404, detail="No trained model weights found for this dataset")
 

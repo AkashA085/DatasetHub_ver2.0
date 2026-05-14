@@ -4,7 +4,7 @@ pydantic==2.9.2
 python-multipart==0.0.6
 
 # Scientific / ML
-numpy==2.4.4
+numpy==2.2.0
 pandas==2.2.3
 matplotlib==3.10.8
 Pillow==12.2.0
@@ -24,6 +24,7 @@ requests==2.33.1
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
+--extra-index-url https://download.pytorch.org/whl/cu121
 
 # Templates
 jinja2==3.1.3

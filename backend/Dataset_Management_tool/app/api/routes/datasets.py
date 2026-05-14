@@ -376,7 +376,7 @@ async def list_dataset_images(
     for img in images:
         # Convert absolute path to relative URL
         rel_path = ""
-        if "storage" in img.file_path:
+        if img.file_path and "storage" in img.file_path:
             parts = img.file_path.split("storage")
             if len(parts) > 1:
                 rel_path = "/storage" + parts[1].replace("\\", "/")

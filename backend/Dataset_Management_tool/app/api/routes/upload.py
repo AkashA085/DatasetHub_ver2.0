@@ -48,6 +48,9 @@ async def upload_dataset(
         return await asyncio.wait_for(_upload_dataset_impl(request, images_zip, labels_zip, format_type, storage_path, db), timeout=300.0)  # 5 minutes timeout
     except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail="Upload timed out. Please try with smaller files or check your internet connection.")
+    except HTTPException:
+        # Re-raise standard HTTP exceptions from implementation
+        raise
     except Exception as e:
         print(f"Upload failed: {e}")
         import traceback

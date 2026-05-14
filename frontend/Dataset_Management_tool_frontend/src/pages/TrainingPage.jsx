@@ -55,6 +55,15 @@ const getJobTrainingImages = (job) => {
 
 const boolFromSelect = (value) => value === 'true';
 
+const getDownloadUrl = (absolutePath) => {
+    if (!absolutePath) return null;
+    const match = absolutePath.match(/training\/jobs\/.+/);
+    if (match) {
+        return `/api/storage/${match[0]}`;
+    }
+    return null;
+};
+
 function TrainingPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -65,6 +74,7 @@ function TrainingPage() {
     const [jobs, setJobs] = useState([]);
     const [selectedJobId, setSelectedJobId] = useState('');
     const [stoppingJobId, setStoppingJobId] = useState('');
+    const [deviceInfo, setDeviceInfo] = useState(null);
 
     const [form, setForm] = useState({
         dataset_id: '',
@@ -76,7 +86,7 @@ function TrainingPage() {
         image_size: 640,
         learning_rate: 0.01,
         optimizer: 'auto',
-        device: 'cpu',
+        device: 'auto',
         val_split: 0.2,
         test_split: 0.1,
         seed: 42,
@@ -120,12 +130,24 @@ function TrainingPage() {
         }
     };
 
+    const fetchDevices = async () => {
+        try {
+            const response = await datasetApi.getAvailableDevices();
+            setDeviceInfo(response);
+            // Always set device to recommended (GPU 0 if available, CPU otherwise)
+            setForm((prev) => ({ ...prev, device: response.recommended_device }));
+        } catch (e) {
+            // Silently handle device detection failure - default to GPU 0
+            console.warn('Device detection failed:', e);
+        }
+    };
+
     useEffect(() => {
         const run = async () => {
             try {
                 setLoading(true);
                 setError('');
-                await Promise.all([fetchDatasets(), fetchJobs()]);
+                await Promise.all([fetchDatasets(), fetchJobs(), fetchDevices()]);
             } catch (e) {
                 setError(normalizeApiError(e, 'Failed to load training page'));
             } finally {
@@ -407,14 +429,25 @@ function TrainingPage() {
 
                     <div className="training-grid-2">
                         <div>
-                            <label>Device</label>
+                            <label>
+                                Device (GPU Training)
+                                {deviceInfo && (
+                                    <div style={{ fontSize: '0.85em', color: '#28a745', marginTop: '4px', fontWeight: 'bold' }}>
+                                        ✓ {deviceInfo.message}
+                                    </div>
+                                )}
+                            </label>
                             <select
                                 value={form.device}
                                 onChange={(e) => setForm((prev) => ({ ...prev, device: e.target.value }))}
                             >
-                                <option value="auto">Auto</option>
-                                <option value="cpu">CPU</option>
-                                <option value="0">GPU 0</option>
+                                {deviceInfo?.devices?.map((gpu) => (
+                                    <option key={gpu.device_id} value={gpu.device_id}>
+                                        🚀 {gpu.device_name} ({gpu.total_memory_gb}GB)
+                                    </option>
+                                ))}
+                                <option value="0">🚀 GPU 0 (Default)</option>
+                                <option value="cpu" style={{ color: '#d9534f' }}>🐢 CPU (Very Slow - Not Recommended)</option>
                             </select>
                         </div>
                         <div>
@@ -673,10 +706,48 @@ function TrainingPage() {
 
                             {selectedJob.artifacts && (
                                 <div className="artifact-block">
-                                    <h4>Artifacts</h4>
-                                    <p><strong>Run Dir:</strong> {selectedJob.artifacts.run_dir || '-'}</p>
-                                    <p><strong>Best Weights:</strong> {selectedJob.artifacts.best_weights || '-'}</p>
-                                    <p><strong>Last Weights:</strong> {selectedJob.artifacts.last_weights || '-'}</p>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                        <h4>Artifacts</h4>
+                                        {selectedJob.status === 'completed' && (
+                                            <a 
+                                                href={`/api/train/jobs/${selectedJob.job_id}/download`}
+                                                download={`training_${selectedJob.job_id}.zip`}
+                                                className="btn btn-primary small-btn" 
+                                                style={{ textDecoration: 'none' }}
+                                            >
+                                                Download Full Training Folder (ZIP)
+                                            </a>
+                                        )}
+                                    </div>
+                                    <p>
+                                        <strong>Run Dir:</strong> {selectedJob.artifacts.run_dir || '-'}
+                                    </p>
+                                    <p>
+                                        <strong>Best Weights:</strong> {selectedJob.artifacts.best_weights || '-'}
+                                        {selectedJob.artifacts.best_weights && selectedJob.status === 'completed' && (
+                                            <a 
+                                                href={getDownloadUrl(selectedJob.artifacts.best_weights)} 
+                                                download={`best_${selectedJob.job_id}.pt`}
+                                                className="btn btn-primary small-btn" 
+                                                style={{ marginLeft: '10px', textDecoration: 'none' }}
+                                            >
+                                                Download
+                                            </a>
+                                        )}
+                                    </p>
+                                    <p>
+                                        <strong>Last Weights:</strong> {selectedJob.artifacts.last_weights || '-'}
+                                        {selectedJob.artifacts.last_weights && selectedJob.status === 'completed' && (
+                                            <a 
+                                                href={getDownloadUrl(selectedJob.artifacts.last_weights)} 
+                                                download={`last_${selectedJob.job_id}.pt`}
+                                                className="btn btn-secondary small-btn" 
+                                                style={{ marginLeft: '10px', textDecoration: 'none' }}
+                                            >
+                                                Download
+                                            </a>
+                                        )}
+                                    </p>
                                 </div>
                             )}
 

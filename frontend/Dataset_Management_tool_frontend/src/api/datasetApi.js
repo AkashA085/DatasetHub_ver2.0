@@ -83,6 +83,12 @@ export const datasetApi = {
         return response.data;
     },
 
+    // Get available compute devices (GPU/CPU)
+    getAvailableDevices: async () => {
+        const response = await api.get('/train/devices');
+        return response.data;
+    },
+
     // Start a training job
     startTraining: async (payload) => {
         const response = await api.post('/train/start', payload, {

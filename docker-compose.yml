@@ -1,12 +1,11 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: dataset_management
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -18,8 +17,10 @@ services:
   backend:
     build:
       context: ./backend/Dataset_Management_tool
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/dataset_management
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/dataset_management
+      DATASET_STORAGE_ROOT: /app/app/storage
     depends_on:
       db:
         condition: service_healthy
@@ -27,10 +28,19 @@ services:
       - "8000:8000"
     volumes:
       - backend_storage:/app/app/storage
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   frontend:
     build:
       context: ./frontend/Dataset_Management_tool_frontend
+    restart: unless-stopped
     depends_on:
       - backend
     ports:

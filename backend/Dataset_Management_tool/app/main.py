@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Load environment variables from .env file FIRST
 from dotenv import load_dotenv
-load_dotenv()
+dotenv_path = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path)
 
 # NOW import everything else that needs DATABASE_URL
 from app.api.routes import upload, labeling, export, augmentation, datasets, training
@@ -33,7 +34,7 @@ ensure_dirs()
 
 # Initialize & create DB tables (will use DATABASE_URL env var if provided)
 from app.core import Base, engine, ensure_additional_columns
-Base.metadata.create_all(bind=engine)
+
 # Ensure any newly-added JSON columns exist (safe / idempotent helper)
 try:
     ensure_additional_columns(engine)
@@ -45,9 +46,12 @@ from fastapi.responses import JSONResponse
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    print(f"Request: {request.method} {request.url} Content-Length: {request.headers.get('content-length', 'unknown')}")
+    is_polling = "/train/jobs" in request.url.path
+    if not is_polling:
+        print(f"Request: {request.method} {request.url} Content-Length: {request.headers.get('content-length', 'unknown')}")
     response = await call_next(request)
-    print(f"Response: {response.status_code}")
+    if not is_polling:
+        print(f"Response: {response.status_code}")
     return response
 
 @app.middleware("http")

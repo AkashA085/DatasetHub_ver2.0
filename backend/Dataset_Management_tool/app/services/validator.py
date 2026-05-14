@@ -10,6 +10,7 @@ class DatasetValidator:
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.image_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
+        self.label_extensions = {".txt", ".xml", ".json"}
         self._hash_suffix_pattern = re.compile(r"_[0-9a-f]{12}$")
 
     def _normalize_stem(self, p: Path) -> str:
@@ -46,7 +47,12 @@ class DatasetValidator:
         
         # Deduplicate paths (resolving to absolute to be sure)
         all_image_paths = {p.resolve(): p for p in all_image_paths}
-        all_label_paths = {p.resolve(): p for p in self.labels_dir.rglob("*.txt")}
+        
+        all_label_paths_list = []
+        for ext in self.label_extensions:
+            all_label_paths_list.extend(list(self.labels_dir.rglob(f"*{ext}")))
+            all_label_paths_list.extend(list(self.labels_dir.rglob(f"*{ext.upper()}")))
+        all_label_paths = {p.resolve(): p for p in all_label_paths_list}
 
         # Search for classes.txt specifically for metadata
         class_names = []
@@ -75,8 +81,23 @@ class DatasetValidator:
         image_stems = set(image_map.keys())
         label_stems = set(label_map.keys())
 
-        # 3. Set Logic
+        # 3. Handle COCO (Special Case: one JSON for all images)
+        coco_annotations = []
+        coco_file_path = None
+        for p in all_label_paths.values():
+            if p.suffix.lower() == ".json" and p.name.lower() != "metadata.json":
+                coco_annotations = self._parse_coco(p, image_map)
+                if coco_annotations:
+                    coco_file_path = p
+                    break
+
+        # 4. Set Logic
         matched_stems = image_stems & label_stems
+        if coco_file_path:
+            # If COCO found, we treat matched images from COCO as matched
+            coco_stems = {ann.image_name.lower() for ann in coco_annotations}
+            matched_stems |= (image_stems & coco_stems)
+
         matched_pairs: Dict[str, str] = {s: s for s in matched_stems}
         missing_label_stems = set(image_stems - label_stems)
         orphan_label_stems = set(label_stems - image_stems)
@@ -119,10 +140,16 @@ class DatasetValidator:
         stem_to_image_path = {}
         stem_to_label_path = {}
 
+        class_map = {name: i for i, name in enumerate(class_names)}
+
         # 4. Process Matched Pairs
         for stem in matched_stems:
             img_path = image_map[stem]
-            label_path = label_map[matched_pairs.get(stem, stem)]
+            label_path = label_map.get(matched_pairs.get(stem, stem))
+            
+            # For COCO, label_path might be None if it's the shared JSON
+            if not label_path and coco_file_path:
+                label_path = coco_file_path
 
             # Check image corruption & get size
             try:
@@ -136,8 +163,14 @@ class DatasetValidator:
             stem_to_image_path[stem] = img_path
             stem_to_label_path[stem] = label_path
 
-            # Parse YOLO label
-            objects = self._parse_yolo(label_path, width, height)
+            if label_path.suffix.lower() == ".xml":
+                objects = self._parse_pascal(label_path, class_map)
+            elif label_path.suffix.lower() == ".json":
+                # COCO is handled separately or we look up from coco_annotations
+                matching_coco = [a for a in coco_annotations if a.image_name.lower() == stem]
+                objects = matching_coco[0].objects if matching_coco else []
+            else:
+                objects = self._parse_yolo(label_path, width, height)
             
             if not objects:
                 empty_label_files_list.append(label_path.name)
@@ -216,3 +249,73 @@ class DatasetValidator:
         except Exception:
             pass
         return boxes
+
+    def _parse_pascal(self, label_path: Path, class_map: Dict[str, int]) -> List[BoundingBox]:
+        """Parse Pascal VOC XML format."""
+        import xml.etree.ElementTree as ET
+        objects = []
+        try:
+            tree = ET.parse(label_path)
+            root = tree.getroot()
+            for obj in root.findall("object"):
+                name = obj.find("name").text
+                
+                # Map name to int ID
+                if name in class_map:
+                    cid = class_map[name]
+                else:
+                    # Fallback or dynamic
+                    try:
+                        cid = int(name)
+                    except ValueError:
+                        cid = len(class_map)
+                        class_map[name] = cid
+                
+                bndbox = obj.find("bndbox")
+                xmin = float(bndbox.find("xmin").text)
+                ymin = float(bndbox.find("ymin").text)
+                xmax = float(bndbox.find("xmax").text)
+                ymax = float(bndbox.find("ymax").text)
+                objects.append(BoundingBox(class_id=cid, xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax))
+        except Exception:
+            pass
+        return objects
+    def _parse_coco(self, label_path: Path, image_map: Dict[str, Path]) -> List[ImageAnnotation]:
+        """Parse COCO JSON format."""
+        import json
+        annotations = []
+        try:
+            with open(label_path, 'r') as f:
+                data = json.load(f)
+            
+            images = {img["id"]: img for img in data.get("images", [])}
+            # Map category_id to index if possible, or just use it
+            
+            from collections import defaultdict
+            img_to_objs = defaultdict(list)
+            for ann in data.get("annotations", []):
+                img_id = ann.get("image_id")
+                bbox = ann.get("bbox") # [x, y, w, h]
+                if img_id in images and bbox:
+                    xmin, ymin, w, h = bbox
+                    img_to_objs[img_id].append(BoundingBox(
+                        class_id=int(ann.get("category_id", 0)),
+                        xmin=float(xmin),
+                        ymin=float(ymin),
+                        xmax=float(xmin + w),
+                        ymax=float(ymin + h)
+                    ))
+            
+            for img_id, img_info in images.items():
+                fname = img_info.get("file_name")
+                if not fname: continue
+                stem = Path(fname).stem.lower()
+                annotations.append(ImageAnnotation(
+                    image_name=stem,
+                    width=img_info.get("width", 0),
+                    height=img_info.get("height", 0),
+                    objects=img_to_objs[img_id]
+                ))
+        except Exception:
+            pass
+        return annotations

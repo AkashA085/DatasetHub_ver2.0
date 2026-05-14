@@ -7,7 +7,11 @@ from pathlib import Path
 
 # Storage root can be configured via env var.
 # Default is outside backend app tree to avoid dev-server autoreload loops during large uploads.
-_DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[4] / "datasethub_storage"
+try:
+    _DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[4] / "datasethub_storage"
+except IndexError:
+    _DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage"
+
 STORAGE_ROOT = Path(os.getenv("DATASET_STORAGE_ROOT", str(_DEFAULT_STORAGE_ROOT))).resolve()
 
 UPLOADS_DIR = STORAGE_ROOT / "uploads"

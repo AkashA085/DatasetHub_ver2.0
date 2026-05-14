@@ -1,40 +1,29 @@
-<<<<<<< HEAD
-FROM node:20-alpine AS build
+# Build Stage
+FROM node:18-alpine AS build
 
 WORKDIR /app
+
+# Install dependencies using clean install for reproducible builds
 COPY package*.json ./
 RUN npm ci
 
+# Copy the rest of the source code
 COPY . .
+
+# Build the Vite application for production
 RUN npm run build
 
-FROM nginx:1.27-alpine
+# Production Stage
+FROM nginx:alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Copy the built assets from the build stage
 COPY --from=build /app/dist /usr/share/nginx/html
 
+# Copy the custom nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Expose port 80
 EXPOSE 80
-=======
-FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
->>>>>>> 23e9a7e1a5035894868b5559b83e62a7d9086933
+# Start nginx in the foreground
+CMD ["nginx", "-g", "daemon off;"]

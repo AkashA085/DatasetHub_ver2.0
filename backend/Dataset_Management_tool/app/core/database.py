@@ -3,6 +3,7 @@
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, ForeignKey, Boolean, Float, JSON
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
@@ -10,13 +11,17 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    # For development: use PostgreSQL if available, else raise error for production awareness
-    raise ValueError(
-        "DATABASE_URL environment variable required. "
-        "Set it to: postgresql+psycopg2://user:password@host:5432/Database_management"
-    )
+    # For development: use SQLite as default with absolute path
+    db_dir = Path(__file__).resolve().parent.parent.parent  # Go up to backend folder
+    db_file = db_dir / "dataset_management.db"
+    DATABASE_URL = f"sqlite:///{db_file}"
+    print(f"⚠️  No DATABASE_URL set, using default SQLite database: {db_file}")
 
-engine = create_engine(DATABASE_URL, future=True)
+# Configure engine based on database type
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, future=True, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL, future=True)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
@@ -180,3 +185,13 @@ class TrainingJob(Base):
     logs = Column(JSON, nullable=True)  # list of log messages
 
     dataset = relationship("Dataset")
+
+
+# Create any missing tables on startup.
+try:
+    Base.metadata.create_all(engine)
+    print(f"✓ Database tables created/verified successfully")
+except Exception as e:
+    print(f"⚠️  Error creating database tables: {e}")
+    import traceback
+    traceback.print_exc()
