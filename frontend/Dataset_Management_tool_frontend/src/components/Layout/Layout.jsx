@@ -19,7 +19,7 @@ function Layout({ children }) {
             <aside className="sidebar glass">
                 <div className="sidebar-header">
                     <h1 className="logo">
-                        <span className="logo-icon">DH</span>
+                        <span className="logo-icon">FWD</span>
                         <span className="logo-text">DatasetHub</span>
                     </h1>
                 </div>

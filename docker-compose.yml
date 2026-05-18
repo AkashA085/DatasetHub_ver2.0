@@ -8,6 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-mlflow.sh:/docker-entrypoint-initdb.d/init-mlflow.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d dataset_management"]
       interval: 10s

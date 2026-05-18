@@ -9,7 +9,7 @@ from pathlib import Path
 # Default is outside backend app tree to avoid dev-server autoreload loops during large uploads.
 try:
     _DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[4] / "datasethub_storage"
-except IndexError:
+except IndexError:  # pragma: no cover
     _DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage"
 
 STORAGE_ROOT = Path(os.getenv("DATASET_STORAGE_ROOT", str(_DEFAULT_STORAGE_ROOT))).resolve()
@@ -49,7 +49,7 @@ def extract_zip(zip_path: Path, extract_to: Path):
 
             # Windows long-path fallback: flatten filename using a hash based on path WITHOUT suffix.
             # This keeps image/label stem alignment intact (e.g., a.jpg and a.txt remain same stem).
-            if os.name == "nt" and len(target_str) > 240:
+            if os.name == "nt" and len(target_str) > 240:  # pragma: no cover
                 original = Path(safe_name)
                 suffix = original.suffix.lower()
                 stem = original.stem[:80]

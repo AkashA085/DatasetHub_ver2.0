@@ -105,6 +105,7 @@ function TrainingPage() {
         model_version: '',
         model_stage: 'Staging',
         model_description: '',
+        patience: 20,
     });
 
     const selectedJob = useMemo(
@@ -162,7 +163,7 @@ function TrainingPage() {
         if (!hasActiveJob) return undefined;
 
         const timer = setInterval(() => {
-            fetchJobs().catch(() => {});
+            fetchJobs().catch(() => { });
         }, 3000);
         return () => clearInterval(timer);
     }, [jobs]);
@@ -210,6 +211,7 @@ function TrainingPage() {
                 mlflow_tracking_uri: form.mlflow_tracking_uri || null,
                 model_version: form.model_version || null,
                 model_description: form.model_description || null,
+                patience: Number(form.patience),
             };
             const started = await datasetApi.startTraining(payload);
             setNotice('Training job started.');
@@ -413,17 +415,14 @@ function TrainingPage() {
                             />
                         </div>
                         <div>
-                            <label>Optimizer</label>
-                            <select
-                                value={form.optimizer}
-                                onChange={(e) => setForm((prev) => ({ ...prev, optimizer: e.target.value }))}
-                            >
-                                <option value="auto">Auto</option>
-                                <option value="SGD">SGD</option>
-                                <option value="Adam">Adam</option>
-                                <option value="AdamW">AdamW</option>
-                                <option value="RMSProp">RMSProp</option>
-                            </select>
+                            <label>PATIENCE</label>
+                            <input
+                                type="number"
+                                min="0"
+                                max="1000"
+                                value={form.patience}
+                                onChange={(e) => setForm((prev) => ({ ...prev, patience: e.target.value }))}
+                            />
                         </div>
                     </div>
 
@@ -640,14 +639,14 @@ function TrainingPage() {
                                         <span>{formatDateTime(job.created_at)}</span>
                                     </div>
                                     <button
-                                    type="button"
-                                    className="job-item-cancel"
-                                    onClick={(e) => handleCancelJob(e, job)}
-                                    disabled={stoppingJobId === job.job_id}
-                                >
-                                    <FiStopCircle />
-                                    {stoppingJobId === job.job_id ? 'Cancelling...' : isTerminalJob(job.status) ? 'Remove' : 'Cancel'}
-                                </button>
+                                        type="button"
+                                        className="job-item-cancel"
+                                        onClick={(e) => handleCancelJob(e, job)}
+                                        disabled={stoppingJobId === job.job_id}
+                                    >
+                                        <FiStopCircle />
+                                        {stoppingJobId === job.job_id ? 'Cancelling...' : isTerminalJob(job.status) ? 'Remove' : 'Cancel'}
+                                    </button>
                                 </div>
                                 <div className="job-item-id">{safeSlice(job.job_id)}...</div>
                                 <div className="job-item-dataset">Dataset: {safeSlice(job.dataset_id)}...</div>
@@ -709,10 +708,10 @@ function TrainingPage() {
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                         <h4>Artifacts</h4>
                                         {selectedJob.status === 'completed' && (
-                                            <a 
+                                            <a
                                                 href={`/api/train/jobs/${selectedJob.job_id}/download`}
                                                 download={`training_${selectedJob.job_id}.zip`}
-                                                className="btn btn-primary small-btn" 
+                                                className="btn btn-primary small-btn"
                                                 style={{ textDecoration: 'none' }}
                                             >
                                                 Download Full Training Folder (ZIP)
@@ -725,23 +724,33 @@ function TrainingPage() {
                                     <p>
                                         <strong>Best Weights:</strong> {selectedJob.artifacts.best_weights || '-'}
                                         {selectedJob.artifacts.best_weights && selectedJob.status === 'completed' && (
-                                            <a 
-                                                href={getDownloadUrl(selectedJob.artifacts.best_weights)} 
-                                                download={`best_${selectedJob.job_id}.pt`}
-                                                className="btn btn-primary small-btn" 
-                                                style={{ marginLeft: '10px', textDecoration: 'none' }}
-                                            >
-                                                Download
-                                            </a>
+                                            <>
+                                                <a
+                                                    href={getDownloadUrl(selectedJob.artifacts.best_weights)}
+                                                    download={`best_${selectedJob.job_id}.pt`}
+                                                    className="btn btn-primary small-btn"
+                                                    style={{ marginLeft: '10px', textDecoration: 'none' }}
+                                                >
+                                                    Download
+                                                </a>
+                                                <a
+                                                    href={`/api/train/jobs/${selectedJob.job_id}/download`}
+                                                    download={`full_results_${selectedJob.job_id}.zip`}
+                                                    className="btn btn-success small-btn"
+                                                    style={{ marginLeft: '10px', textDecoration: 'none' }}
+                                                >
+                                                    Download Full Results (Weights, Graphs & Frames)
+                                                </a>
+                                            </>
                                         )}
                                     </p>
                                     <p>
                                         <strong>Last Weights:</strong> {selectedJob.artifacts.last_weights || '-'}
                                         {selectedJob.artifacts.last_weights && selectedJob.status === 'completed' && (
-                                            <a 
-                                                href={getDownloadUrl(selectedJob.artifacts.last_weights)} 
+                                            <a
+                                                href={getDownloadUrl(selectedJob.artifacts.last_weights)}
                                                 download={`last_${selectedJob.job_id}.pt`}
-                                                className="btn btn-secondary small-btn" 
+                                                className="btn btn-secondary small-btn"
                                                 style={{ marginLeft: '10px', textDecoration: 'none' }}
                                             >
                                                 Download

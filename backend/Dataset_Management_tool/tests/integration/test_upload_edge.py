@@ -5,6 +5,7 @@ import asyncio
 import io
 import zipfile
 from pathlib import Path
+from app.models.schemas import ValidationReport, AnalysisSummary
 
 def test_upload_dataset_timeout(client):
     # Mock _upload_dataset_impl to simulate timeout
@@ -54,13 +55,14 @@ def test_upload_dataset_invalid_zip(client, tmp_path):
         assert "Invalid or corrupted ZIP file" in response.json()["detail"]
 
 def test_upload_dataset_validation_failed(client):
-    # Mock validator to return empty annotations
-    mock_report = {
-        "total_images": 0, "total_labels": 0, "missing_labels": 0, "orphan_labels": 0,
-        "empty_labels": 0, "corrupted_images": 0, "class_ids_found": [],
-        "missing_label_images": [], "orphan_label_files": [], "empty_label_files": [],
-        "corrupted_image_files": []
-    }
+    # Mock validator to return empty annotations.
+    # report must support attribute access (upload.py uses report.orphan_labels etc.)
+    mock_report = ValidationReport(
+        total_images=0, total_labels=0, missing_labels=0, orphan_labels=0,
+        empty_labels=0, corrupted_images=0, class_ids_found=[],
+        missing_label_images=[], orphan_label_files=[], empty_label_files=[],
+        corrupted_image_files=[]
+    )
     mock_validator = MagicMock()
     mock_validator.validate.return_value = (mock_report, [], {}, {}, {})
     with patch("app.api.routes.upload.DatasetValidator", return_value=mock_validator), \
@@ -96,19 +98,22 @@ def test_upload_dataset_save_internal_failed(client):
             assert "Failed to save internal format" in response.json()["detail"]
 
 def test_upload_dataset_db_persistence_failed(client):
-    # Mock everything up to DB persistence and make it fail
-    mock_report = {
-        "total_images": 1, "total_labels": 1, "missing_labels": 0, "orphan_labels": 0,
-        "empty_labels": 0, "corrupted_images": 0, "class_ids_found": ["0"],
-        "missing_label_images": [], "orphan_label_files": [], "empty_label_files": [],
-        "corrupted_image_files": []
-    }
-    mock_summary = {
-        "total_images": 1, "total_labels": 1, "total_classes": 1, "total_objects": 1,
-        "avg_objects_per_image": 1.0, "missing_label_count": 0, "corrupted_image_count": 0,
-        "class_distribution": {"0": 1}
-    }
-    
+    """DB persistence failure must NOT fail the upload (it's non-critical).
+    UploadResponse is a strict Pydantic model, so the mocks for report and summary
+    must return real ValidationReport / AnalysisSummary instances.
+    """
+    real_report = ValidationReport(
+        total_images=1, total_labels=1, missing_labels=0, orphan_labels=0,
+        empty_labels=0, corrupted_images=0, class_ids_found=[0],
+        missing_label_images=[], orphan_label_files=[], empty_label_files=[],
+        corrupted_image_files=[]
+    )
+    real_summary = AnalysisSummary(
+        total_images=1, total_labels=1, total_classes=1, total_objects=1,
+        avg_objects_per_image=1.0, missing_label_count=0, corrupted_image_count=0,
+        class_distribution={"0": 1}
+    )
+
     with patch("app.api.routes.upload.DatasetValidator") as mock_v_cls, \
          patch("app.api.routes.upload._save_upload_file", return_value=100), \
          patch("app.api.routes.upload.extract_zip"), \
@@ -118,13 +123,19 @@ def test_upload_dataset_db_persistence_failed(client):
          patch("app.api.routes.upload.get_db"), \
          patch("app.api.routes.upload.json.dump"), \
          patch("builtins.open", MagicMock()):
-        
-        mock_v_cls.return_value.validate.return_value = (MagicMock(**mock_report), [MagicMock(image_name="fake", objects=[])], {"fake": Path("fake.jpg")}, {}, {"0": "drone"})
-        mock_analyzer = mock_a_cls.return_value
-        mock_analyzer.analyze.return_value = MagicMock(**mock_summary)
-        mock_analyzer.analyze.return_value.model_dump.return_value = mock_summary
-        
-        # Mock DB failure
+
+        # Validator returns a real ValidationReport so attribute access works
+        mock_v_cls.return_value.validate.return_value = (
+            real_report,
+            [MagicMock(image_name="fake", objects=[])],
+            {"fake": Path("fake.jpg")},
+            {},
+            {"0": "drone"},
+        )
+        # Analyzer returns a real AnalysisSummary so UploadResponse Pydantic validation passes
+        mock_a_cls.return_value.analyze.return_value = real_summary
+
+        # Mock DB failure — upload should still succeed (200) because DB is non-critical
         with patch("app.api.routes.upload.Session.commit", side_effect=Exception("DB Persistence Error")):
             files = {
                 "images_zip": ("images.zip", b"fake", "application/zip"),
@@ -132,5 +143,5 @@ def test_upload_dataset_db_persistence_failed(client):
             }
             data = {"format_type": "yolo"}
             response = client.post("/upload-dataset", files=files, data=data)
-            # Should still return 200 because DB is non-critical
+            # DB failure is caught and logged; the response must still be 200
             assert response.status_code == 200

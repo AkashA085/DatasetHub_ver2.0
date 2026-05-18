@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import random
 import shutil
 import threading
@@ -66,7 +67,7 @@ def get_training_cfg(params: Dict[str, Any], dataset_path: str, data_yaml: str) 
         cos_lr          = True,
         amp             = True,
         cache           = "disk",
-        patience        = 60,
+        patience        = params.get("patience", 20),
         save_period     = 25,
         # ── Loss weights (small fast objects need strong box loss) ────────────────
         box             = 9.5,
@@ -271,10 +272,10 @@ def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
 
     # train: augment
     write_augmented_split(
-        src_img_dir = str(root / "images" / "train"),
-        src_lbl_dir = str(root / "labels" / "train"),
-        dst_img_dir = str(aug_root / "images" / "train"),
-        dst_lbl_dir = str(aug_root / "labels" / "train"),
+        src_img_dir = str(root / "train" / "images"),
+        src_lbl_dir = str(root / "train" / "labels"),
+        dst_img_dir = str(aug_root / "train" / "images"),
+        dst_lbl_dir = str(aug_root / "train" / "labels"),
         multiplier  = multiplier,
         mode        = "train",
     )
@@ -282,8 +283,8 @@ def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
     import os
     for split in ["val", "test"]:
         for sub in ["images", "labels"]:
-            src = root / sub / split
-            dst = aug_root / sub / split
+            src = root / split / sub
+            dst = aug_root / split / sub
             if src.exists():
                 shutil.copytree(str(src), str(dst), dirs_exist_ok=True, copy_function=os.symlink)
 
@@ -296,6 +297,69 @@ def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
         yaml.dump(orig, f, default_flow_style=False)
 
     return str(new_yaml)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  EARLY STOPPING LOGIC
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EarlyStopping:
+    def __init__(
+        self,
+        patience=20,          # stop after 20 epochs without improvement (default)
+        min_delta=0.001,      # minimum improvement required
+        save_path="best_early_stop.pt"
+    ):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.save_path = save_path
+
+        self.best_metric = None
+        self.no_improve_count = 0
+
+    def step(self, current_metric, model):
+        # First epoch
+        if self.best_metric is None:
+            self.best_metric = current_metric
+            try:
+                torch.save(model.state_dict(), self.save_path)
+                print(f"Initial best metric: {current_metric:.6f}")
+            except Exception as e:
+                print(f"Failed to save initial best model: {e}")
+            return False
+
+        # Check improvement
+        if current_metric > self.best_metric + self.min_delta:
+            print(
+                f"Improved: "
+                f"{self.best_metric:.6f} -> {current_metric:.6f}"
+            )
+            self.best_metric = current_metric
+            self.no_improve_count = 0
+
+            # Save best model
+            try:
+                torch.save(model.state_dict(), self.save_path)
+                print(f"Best model saved: {self.save_path}")
+            except Exception as e:
+                print(f"Failed to save best model: {e}")
+        else:
+            self.no_improve_count += 1
+            print(
+                f"No improvement for "
+                f"{self.no_improve_count} epoch(s)"
+            )
+
+        # Stop condition
+        if self.no_improve_count >= self.patience:
+            print("\nStopping training...")
+            print(
+                f"No improvement in last "
+                f"{self.patience} epochs."
+            )
+            return True
+
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -391,6 +455,32 @@ def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: 
         model.add_callback("on_train_epoch_end", cb.on_train_epoch_end)
         model.add_callback("on_train_end",       cb.on_train_end)
 
+        # ── attach Early Stopping callback ────────────────────────────────────
+        # Save early stopping weights in the run directory
+        job_id = cfg.get("job_id", "unknown")
+        early_stop_save_path = TRAINING_JOBS_DIR / job_id / "early_stop_best.pt"
+        early_stop_save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        early_stopper = EarlyStopping(
+            patience=cfg.get("patience", 20),
+            min_delta=0.001,
+            save_path=str(early_stop_save_path)
+        )
+
+        def on_train_epoch_end_early_stop(trainer):
+            # Extract mAP50-95 from trainer metrics
+            # Note: YOLOv8 uses specific keys in trainer.metrics
+            metrics = trainer.metrics
+            # Try multiple common keys for mAP50-95
+            current_map = metrics.get('metrics/mAP50-95(B)')
+            if current_map is None:
+                current_map = metrics.get('mAP50-95', 0.0)
+            
+            if early_stopper.step(current_map, trainer.model):
+                trainer.stop = True
+
+        model.add_callback("on_train_epoch_end", on_train_epoch_end_early_stop)
+
         # ── YOLO train ────────────────────────────────────────────────────────
         results = model.train(
             data            = active_yaml,
@@ -483,6 +573,7 @@ class TrainingStartRequest(BaseModel):
     model_version: Optional[str] = None
     model_stage: str = "Staging"
     model_description: Optional[str] = None
+    patience: int = Field(20, ge=0, le=1000)
 
 
 class TrainingJobResponse(BaseModel):
@@ -1142,9 +1233,14 @@ def _run_training(job_id: str) -> None:
         experiment_name = job["params"].get("experiment_name", "dataset_training")
         mlflow_tracking_uri = job["params"].get("mlflow_tracking_uri")
         if not mlflow_tracking_uri:
-            # Default to persistent storage to avoid path conflicts and host-leaked absolute paths
-            mlflow_db_path = STORAGE_ROOT / "mlflow.db"
-            mlflow_tracking_uri = f"sqlite:///{mlflow_db_path}"
+            # Try to use PostgreSQL if available, otherwise fallback to SQLite
+            db_url = os.getenv("DATABASE_URL")
+            if db_url:
+                # Replace the database name at the end of the URL with 'mlflow'
+                mlflow_tracking_uri = db_url.rsplit("/", 1)[0] + "/mlflow"
+            else:
+                mlflow_db_path = STORAGE_ROOT / "mlflow.db"
+                mlflow_tracking_uri = f"sqlite:///{mlflow_db_path}"
 
         mlflow = None
         mlflow_client = None
@@ -1486,9 +1582,10 @@ def _run_training(job_id: str) -> None:
         _append_log(job, f"Training failed: {job['error']}")
         _append_log(job, traceback.format_exc())
     finally:
-        if not job.get("finished_at"):
-            job["finished_at"] = datetime.utcnow().isoformat()
-        _save_job_to_db(job, db)
+        if job is not None:
+            if not job.get("finished_at"):
+                job["finished_at"] = datetime.utcnow().isoformat()
+            _save_job_to_db(job, db)
         db.close()
 
 

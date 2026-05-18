@@ -5,12 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    YOLO_CONFIG_DIR=/app/.ultralytics
+    YOLO_CONFIG_DIR=/app/.ultralytics \
+    MPLCONFIGDIR=/app/.matplotlib \
+    HOME=/app
 
-# Create an unprivileged user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Create an unprivileged user with a home directory
+RUN groupadd -r appuser && useradd -m -g appuser appuser
 
-# Install Python 3.12, venv, and required system packages for YOLO/OpenCV
+# Install Python 3.12, venv, git, and required system packages for YOLO/OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update \
@@ -22,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     build-essential \
     libgl1 \
     libglib2.0-0 \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlink for python
@@ -40,8 +43,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Set proper permissions so YOLO can write to required directories and the user can read
-RUN mkdir -p /app/.ultralytics /app/app/storage && \
+# Set proper permissions so YOLO can write to required directories
+RUN mkdir -p /app/.ultralytics /app/.matplotlib /app/.config /app/app/storage && \
     chown -R appuser:appuser /app /opt/venv
 
 # Switch to the non-root user
