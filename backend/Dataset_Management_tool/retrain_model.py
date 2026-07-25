@@ -4,13 +4,15 @@ This script trains a fresh model that will actually detect drones
 """
 
 import os
+# (CUDA visibility left unchanged – GPU can be used)
+
 import sys
 from pathlib import Path
 from ultralytics import YOLO
 import yaml
 
 
-def retrain_model(dataset_yaml_path, epochs=100, batch_size=16, img_size=640, device="cpu"):
+def retrain_model(dataset_yaml_path, epochs=100, batch_size=16, img_size=640, device="auto", model_name="yolov8n.pt"):
     """
     Retrain YOLOv8 model on your dataset
     
@@ -20,10 +22,11 @@ def retrain_model(dataset_yaml_path, epochs=100, batch_size=16, img_size=640, de
         batch_size: Batch size
         img_size: Image size
         device: 'cpu' or 'cuda' or GPU number
+        model_name: Name of the YOLO model (e.g., yolov8n.pt, yolo11n.pt)
     """
     
     print("\n" + "="*60)
-    print("🚀 YOLO DRONE DETECTOR - TRAINING")
+    print(" YOLO DRONE DETECTOR - TRAINING")
     print("="*60)
     
     # Validate data.yaml
@@ -45,10 +48,10 @@ def retrain_model(dataset_yaml_path, epochs=100, batch_size=16, img_size=640, de
     print(f"   Number of classes: {config.get('nc')}")
     
     # Load pretrained model
-    print(f"\n📦 Loading YOLOv8 pretrained model...")
-    model = YOLO('yolov8n.pt')  # nano model for speed, use yolov8s.pt for better accuracy
+    print(f"\n📦 Loading pretrained model: {model_name}...")
+    model = YOLO(model_name)
     
-    print(f"✅ Model loaded: YOLOv8 Nano")
+    print(f"✅ Model loaded: {model_name}")
     
     # Train the model
     print(f"\n🏋️  Starting training with these parameters:")
@@ -157,6 +160,13 @@ Examples:
         help="Device: 'cpu', 'cuda', or GPU number like '0' (default: cpu)"
     )
     
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="yolov8n.pt",
+        help="Model to use (default: yolov8n.pt, options: yolov8s.pt, yolo11n.pt, etc.)"
+    )
+    
     args = parser.parse_args()
     
     success = retrain_model(
@@ -164,7 +174,8 @@ Examples:
         epochs=args.epochs,
         batch_size=args.batch,
         img_size=args.img_size,
-        device=args.device
+        device=args.device,
+        model_name=args.model
     )
     
     sys.exit(0 if success else 1)

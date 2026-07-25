@@ -12,7 +12,7 @@ import argparse
 import numpy as np
 
 
-def test_model_on_image(model_path: str, image_path: str, output_dir: str = "inference_results", conf_threshold: float = 0.25):
+def test_model_on_image(model_path: str, image_path: str, output_dir: str = "inference_results", conf_threshold: float = 0.50):
     """
     Test trained YOLOv8 model on a single image
     
@@ -118,7 +118,7 @@ def test_model_on_image(model_path: str, image_path: str, output_dir: str = "inf
         return False
 
 
-def test_model_on_video(model_path: str, video_path: str, output_dir: str = "inference_results", conf_threshold: float = 0.25, max_frames: int = 100):
+def test_model_on_video(model_path: str, video_path: str, output_dir: str = "inference_results", conf_threshold: float = 0.50, max_frames: int = 100):
     """
     Test trained YOLOv8 model on a video file
     
