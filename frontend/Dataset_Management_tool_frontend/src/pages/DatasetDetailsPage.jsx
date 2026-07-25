@@ -431,12 +431,16 @@ const getImageSrc = (url) => {
         );
     }
 
+    if (!dataset) {
+        return <LoadingSpinner message="Loading dataset details..." />;
+    }
+
     // Prepare chart data
     const classDistributionData = {
-        labels: dataset.class_distribution.map(cd => `Class ${cd.class_id}`),
+        labels: (dataset.class_distribution || []).map(cd => `Class ${cd.class_id}`),
         datasets: [{
             label: 'Object Count',
-            data: dataset.class_distribution.map(cd => cd.object_count),
+            data: (dataset.class_distribution || []).map(cd => cd.object_count),
             backgroundColor: [
                 'rgba(102, 126, 234, 0.8)',
                 'rgba(118, 75, 162, 0.8)',

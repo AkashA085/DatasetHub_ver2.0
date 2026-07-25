@@ -61,7 +61,7 @@ echo "✅ NVIDIA runtime successfully registered."
 # -------------------------------------------------------------------
 # 5️⃣ Build and launch the backend service using Docker Compose
 # -------------------------------------------------------------------
-cd "${SCRIPT_DIR}/.."  # Move to repository root (MODEL_TRAINIG_AGENTS)
+cd "${SCRIPT_DIR}/.."  # Move to repository root
 
 echo "Building and starting backend..."
 # The compose file already specifies `runtime: nvidia`; with the daemon configured this will work.

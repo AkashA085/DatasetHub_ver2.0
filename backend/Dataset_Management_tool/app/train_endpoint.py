@@ -7,7 +7,7 @@ from app.utils.file_utils import STORAGE_ROOT
 
 router = APIRouter()
 
-PROJECT_ROOT = STORAGE_ROOT.parent  # MODEL_TRAINIG_AGENTS root
+PROJECT_ROOT = STORAGE_ROOT.parent  # Project root
 
 
 class TrainRequest(BaseModel):
