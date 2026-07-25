@@ -6,8 +6,8 @@ These endpoints provide read-only access to the database for frontend display.
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, asc
-from typing import Optional, List
-from app.core.database import get_db, Dataset, Image, Label, DatasetValidation, ClassDistribution, Project
+from typing import Optional, List, Dict
+from app.core.database import get_db, Dataset, Image, Label, DatasetValidation, ClassDistribution, Project, TrainingJob
 import os
 import uuid
 import shutil
@@ -138,13 +138,15 @@ class ImageIssuesResponse(BaseModel):
 
 
 def _to_storage_url(file_path: str) -> str:
-    """Convert an absolute file path to mounted `/storage/...` URL."""
-    if not file_path or "storage" not in file_path:
+    """Convert an absolute file path to mounted `/storage/...` URL via STORAGE_ROOT."""
+    from app.utils.file_utils import STORAGE_ROOT as _SR
+    if not file_path:
         return ""
-    parts = file_path.split("storage")
-    if len(parts) <= 1:
+    try:
+        rel = Path(file_path).resolve().relative_to(_SR.resolve())
+        return "/storage/" + str(rel).replace("\\", "/")
+    except (ValueError, TypeError):
         return ""
-    return "/storage" + parts[1].replace("\\", "/")
 
 
 def _parse_yolo_bbox(raw_bbox) -> Optional[List[float]]:
@@ -190,11 +192,18 @@ def _compute_blur_score(file_path: str) -> Optional[float]:
         return None
 
 
+_annotations_cache: Dict[str, dict] = {}
+_annotations_cache_max = 20
+
+
 def _load_annotations_yolo_map(dataset_id: str) -> dict:
     """
     Load validator output saved at upload time and expose labels as YOLO normalized coords.
-    Keyed by image stem lowercase.
+    Keyed by image stem lowercase. Results are cached for performance.
     """
+    if dataset_id in _annotations_cache:
+        return _annotations_cache[dataset_id]
+
     result = {}
     ann_path = PROCESSED_DIR / dataset_id / "annotations.json"
     if not ann_path.exists():
@@ -233,8 +242,15 @@ def _load_annotations_yolo_map(dataset_id: str) -> dict:
                 ))
 
             result[stem] = labels
-    except Exception:
-        return {}
+    except Exception as e:
+        print(f"Warning: Failed to load annotations from {ann_path}: {e}")
+
+    # Cache with LRU eviction
+    if len(_annotations_cache) >= _annotations_cache_max:
+        _annotations_cache.pop(next(iter(_annotations_cache)))
+    _annotations_cache[dataset_id] = result
+
+    return result
 
     return result
 
@@ -353,16 +369,16 @@ async def list_dataset_images(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    query = db.query(Image).filter(Image.dataset_id == dataset_id).options(joinedload(Image.labels))
-    
-    # Filter by label status if provided
+    # Get total count (separate query to avoid joinedload inflation)
+    count_query = db.query(Image).filter(Image.dataset_id == dataset_id)
     if has_label is not None:
-        query = query.filter(Image.has_label == has_label)
-    
-    # Get total count
-    total = query.count()
+        count_query = count_query.filter(Image.has_label == has_label)
+    total = count_query.count()
     
     # Pagination
+    query = db.query(Image).filter(Image.dataset_id == dataset_id).options(joinedload(Image.labels))
+    if has_label is not None:
+        query = query.filter(Image.has_label == has_label)
     offset = (page - 1) * limit
     images = query.offset(offset).limit(limit).all()
     
@@ -374,12 +390,7 @@ async def list_dataset_images(
     # Process images to include URLs and labels
     processed_images = []
     for img in images:
-        # Convert absolute path to relative URL
-        rel_path = ""
-        if img.file_path and "storage" in img.file_path:
-            parts = img.file_path.split("storage")
-            if len(parts) > 1:
-                rel_path = "/storage" + parts[1].replace("\\", "/")
+        rel_path = _to_storage_url(img.file_path)
         
         labels_info = []
         image_stem = Path(img.file_name).stem.lower() if img.file_name else ""
@@ -601,26 +612,7 @@ async def update_image_labels(
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
         
-    # 1. Update Database
-    # Remove old labels
-    db.query(Label).filter(Label.image_id == image_id).delete()
-    
-    # Add new labels
-    for lbl_info in labels:
-        new_label = Label(
-            id=str(uuid.uuid4()),
-            image_id=image_id,
-            class_id=lbl_info.class_id,
-            bbox_data={"yolo": lbl_info.bbox.yolo}
-        )
-        db.add(new_label)
-    
-    # Update has_label flag
-    img.has_label = len(labels) > 0
-    db.commit()
-    
-    # 2. Update File System (YOLO format)
-    # Find .txt file path robustly
+    # 1. Update File System FIRST (write file before DB commit)
     img_path = Path(img.file_path)
     img_path_parts = list(img_path.parts)
     
@@ -631,7 +623,6 @@ async def update_image_labels(
         label_parts[idx] = "labels"
         label_file_path = Path(*label_parts).with_suffix(".txt")
     else:
-        # Fallback to simple structure
         labels_dir = img_path.parent.parent / "labels"
         label_file_path = labels_dir / (img_path.stem + ".txt")
     
@@ -643,8 +634,25 @@ async def update_image_labels(
                     yolo = lbl_info.bbox.yolo
                     f.write(f"{lbl_info.class_id} {' '.join(map(str, yolo))}\n")
     except Exception as e:
-        print(f"Failed to update label file: {str(e)}")
-        # We don't raise here to keep DB in sync, but maybe we should?
+        raise HTTPException(status_code=500, detail=f"Failed to write label file: {str(e)}")
+    
+    # 2. Update Database (only after file write succeeds)
+    db.query(Label).filter(Label.image_id == image_id).delete()
+    
+    for lbl_info in labels:
+        new_label = Label(
+            id=str(uuid.uuid4()),
+            image_id=image_id,
+            class_id=lbl_info.class_id,
+            bbox_data={"yolo": lbl_info.bbox.yolo}
+        )
+        db.add(new_label)
+    
+    img.has_label = len(labels) > 0
+    db.commit()
+    
+    # Invalidate annotations cache for this dataset
+    _annotations_cache.pop(dataset_id, None)
         # For now just log it.
         
     return LabelUpdateResponse(status="success", message="Labels updated successfully")
@@ -672,7 +680,7 @@ async def delete_dataset(
         # B. Cleanup Structured Storage (STORAGE_ROOT/user_id/project_id/dataset_id)
         # We also scan for any folder matching the dataset_id in the entire storage tree
         # to handle accidental nested folders or path mistakes.
-        search_roots = [STORAGE_ROOT, Path("dataset_backend/app/storage")]
+        search_roots = [STORAGE_ROOT]
         for root in search_roots:
             if not root.exists():
                 continue
@@ -700,6 +708,7 @@ async def delete_dataset(
         db.query(Image).filter(Image.dataset_id == dataset_id).delete(synchronize_session=False)
         db.query(DatasetValidation).filter(DatasetValidation.dataset_id == dataset_id).delete(synchronize_session=False)
         db.query(ClassDistribution).filter(ClassDistribution.dataset_id == dataset_id).delete(synchronize_session=False)
+        db.query(TrainingJob).filter(TrainingJob.dataset_id == dataset_id).delete(synchronize_session=False)
         db.query(Dataset).filter(Dataset.id == dataset_id).delete(synchronize_session=False)
         
         db.commit()

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { FiZap, FiRotateCw, FiSun, FiDroplet } from 'react-icons/fi';
 import { datasetApi } from '../api/datasetApi';
@@ -27,8 +27,13 @@ function AugmentationPage() {
         export_format: 'yolo',
     });
 
+    const redirectTimer = useRef(null);
+
     useEffect(() => {
         fetchDatasets();
+        return () => {
+            if (redirectTimer.current) clearTimeout(redirectTimer.current);
+        };
     }, []);
 
     const fetchDatasets = async () => {
@@ -59,7 +64,7 @@ function AugmentationPage() {
             });
 
             setSuccess(true);
-            setTimeout(() => {
+            redirectTimer.current = setTimeout(() => {
                 navigate(`/datasets/${selectedDataset}`);
             }, 2000);
         } catch (err) {

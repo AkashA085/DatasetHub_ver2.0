@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 *.log
 *.db
+.env
 
 # Dataset Storage
 storage/
@@ -19,6 +20,15 @@ datasethub_storage/
 mlruns/
 runs/
 test_results/
+
+# Core dumps and caches
+core.*
+.cache/
+yolo26n/
+
+# Old/dead code
+backend/app.py
+backend/app/
 
 # =========================
 # Frontend / Node

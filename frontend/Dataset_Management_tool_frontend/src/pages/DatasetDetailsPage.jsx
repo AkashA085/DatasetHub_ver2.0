@@ -62,7 +62,9 @@ function DatasetDetailsPage() {
     const editorCanvasRef = useRef(null);
 
     useEffect(() => {
-        fetchDatasetDetails();
+        const controller = new AbortController();
+        fetchDatasetDetails(controller.signal);
+        return () => controller.abort();
     }, [id]);
 
     useEffect(() => {
@@ -77,15 +79,15 @@ function DatasetDetailsPage() {
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [activeLabelIndex]);
 
-    const fetchDatasetDetails = async () => {
+    const fetchDatasetDetails = async (signal) => {
         try {
             setLoading(true);
             setError(null);
             setNotice('');
 
             const [datasetData, imagesData, issuesData] = await Promise.all([
-                datasetApi.getDataset(id),
-                datasetApi.getDatasetImages(id, { page: 1, limit: 12 }),
+                datasetApi.getDataset(id, { signal }),
+                datasetApi.getDatasetImages(id, { page: 1, limit: 12 }, { signal }),
                 datasetApi.getDatasetImageIssues(id, { page: 1, limit: 12 }),
             ]);
 
@@ -103,6 +105,7 @@ function DatasetDetailsPage() {
             setInteraction(null);
             setIssuesByImageId(indexIssuesByImageId(issuesData.flagged_images || []));
         } catch (err) {
+            if (err.name === 'CanceledError' || err.name === 'AbortError') return;
             setError(err.response?.data?.detail || 'Failed to load dataset details');
         } finally {
             setLoading(false);
@@ -134,10 +137,11 @@ function DatasetDetailsPage() {
         return map;
     };
 
-    const getImageSrc = (url) => {
-        if (!url) return '';
-        return url.startsWith('/api') ? url : `/api${url}`;
-    };
+const getImageSrc = (url) => {
+    if (!url) return '';
+    if (url.startsWith('/api') || url.startsWith('/storage')) return url;
+    return `/api${url}`;
+};
 
     const handleImageError = (imageId) => {
         setFailedImageIds((prev) => new Set(prev).add(imageId));
@@ -593,7 +597,7 @@ function DatasetDetailsPage() {
                         <div className="stat-card card">
                             <div className="stat-icon">📊</div>
                             <div>
-                                <div className="stat-value">{dataset.avg_objects_per_image.toFixed(2)}</div>
+                                <div className="stat-value">{(dataset.avg_objects_per_image ?? 0).toFixed(2)}</div>
                                 <div className="stat-label">Avg Objects/Image</div>
                             </div>
                         </div>

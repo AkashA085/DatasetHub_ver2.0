@@ -71,7 +71,11 @@ function ModelPreviewPage() {
     const didInitialLoadRef = useRef(false);
     const skipDatasetEffectRef = useRef(false);
 
-    const getImageSrc = (url) => (url?.startsWith('/api') ? url : `/api${url}`);
+    const getImageSrc = (url) => {
+    if (!url) return '';
+    if (url.startsWith('/api') || url.startsWith('/storage')) return url;
+    return `/api${url}`;
+};
 
     const normalizeLabelCoords = (raw, forcedFormat, imageSize) => {
         const a = Number(raw?.[0]);
@@ -330,7 +334,7 @@ function ModelPreviewPage() {
             setNotice('');
         };
         update();
-    }, [labelFormatMode, selectedImageId, datasetImages, previewImageSize]);
+    }, [labelFormatMode, selectedImageId, datasetImages]);
 
     useEffect(() => () => {
         if (tempObjectUrlRef.current) URL.revokeObjectURL(tempObjectUrlRef.current);

@@ -31,6 +31,7 @@ class ValidationReport(BaseModel):
     corrupted_images: int
     class_ids_found: List[int]
     missing_label_images: List[str] = Field(default_factory=list)
+    empty_label_images: List[str] = Field(default_factory=list)  # Images whose label files exist but are empty
     orphan_label_files: List[str] = Field(default_factory=list)
     empty_label_files: List[str] = Field(default_factory=list)
     corrupted_image_files: List[str] = Field(default_factory=list)

@@ -9,14 +9,14 @@ const api = axios.create({
 // Dataset API
 export const datasetApi = {
     // List all datasets with pagination
-    listDatasets: async (params = {}) => {
-        const response = await api.get('/datasets', { params });
+    listDatasets: async (params = {}, config = {}) => {
+        const response = await api.get('/datasets', { params, ...config });
         return response.data;
     },
 
     // Get dataset details
-    getDataset: async (datasetId) => {
-        const response = await api.get(`/datasets/${datasetId}`);
+    getDataset: async (datasetId, config = {}) => {
+        const response = await api.get(`/datasets/${datasetId}`, config);
         return response.data;
     },
 
@@ -27,8 +27,8 @@ export const datasetApi = {
     },
 
     // Get dataset images
-    getDatasetImages: async (datasetId, params = {}) => {
-        const response = await api.get(`/datasets/${datasetId}/images`, { params });
+    getDatasetImages: async (datasetId, params = {}, config = {}) => {
+        const response = await api.get(`/datasets/${datasetId}/images`, { params, ...config });
         return response.data;
     },
 
@@ -85,7 +85,7 @@ export const datasetApi = {
 
     // Get available compute devices (GPU/CPU)
     getAvailableDevices: async () => {
-        const response = await api.get('/train/devices');
+        const response = await api.get('/train/detect-devices');
         return response.data;
     },
 
@@ -100,8 +100,9 @@ export const datasetApi = {
     },
 
     // List all training jobs
-    listTrainingJobs: async () => {
-        const response = await api.get('/train/jobs');
+    listTrainingJobs: async (datasetId, config = {}) => {
+        const params = datasetId ? { dataset_id: datasetId } : {};
+        const response = await api.get('/train/jobs', { params, ...config });
         return response.data;
     },
 

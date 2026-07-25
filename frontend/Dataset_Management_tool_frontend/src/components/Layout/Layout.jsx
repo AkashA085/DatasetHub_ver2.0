@@ -19,7 +19,7 @@ function Layout({ children }) {
             <aside className="sidebar glass">
                 <div className="sidebar-header">
                     <h1 className="logo">
-                        <span className="logo-icon">FWD</span>
+                        <img src="/FWD_only_logo.png" alt="FWD" className="logo-img" />
                         <span className="logo-text">DatasetHub</span>
                     </h1>
                 </div>
@@ -27,7 +27,9 @@ function Layout({ children }) {
                 <nav className="sidebar-nav">
                     {navItems.map((item) => {
                         const Icon = item.icon;
-                        const isActive = location.pathname === item.path;
+                        const isActive = item.path === '/'
+                            ? location.pathname === '/'
+                            : location.pathname.startsWith(item.path);
 
                         return (
                             <Link

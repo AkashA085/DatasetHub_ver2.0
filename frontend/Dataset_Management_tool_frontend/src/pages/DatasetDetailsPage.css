@@ -9,6 +9,16 @@
     margin-bottom: var(--spacing-lg);
 }
 
+.page-title {
+    font-size: var(--font-size-4xl);
+    font-weight: 700;
+    margin-bottom: var(--spacing-xs);
+    background: linear-gradient(135deg, var(--primary), var(--secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
 .header-actions {
     display: flex;
     gap: var(--spacing-sm);
@@ -172,18 +182,18 @@
 }
 
 .badge-success {
-    background: rgba(67, 233, 123, 0.2);
+    background: rgba(16, 185, 129, 0.15);
     color: var(--success);
 }
 
 .badge-warning {
-    background: rgba(255, 159, 10, 0.2);
+    background: rgba(245, 158, 11, 0.15);
     color: var(--warning);
 }
 
 .badge-danger {
-    background: rgba(255, 69, 58, 0.18);
-    color: #ff8e88;
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--error);
 }
 
 .issue-badges {
@@ -196,8 +206,8 @@
     margin-bottom: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-md);
     border-radius: var(--radius-md);
-    background: rgba(67, 233, 123, 0.15);
-    border: 1px solid rgba(67, 233, 123, 0.35);
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.25);
     color: var(--success);
 }
 

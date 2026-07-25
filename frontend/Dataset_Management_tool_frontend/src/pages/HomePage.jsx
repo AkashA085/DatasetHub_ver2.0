@@ -14,7 +14,9 @@ function HomePage() {
     const [deletingIds, setDeletingIds] = useState(new Set());
 
     useEffect(() => {
-        fetchDashboardData();
+        const controller = new AbortController();
+        fetchDashboardData(controller.signal);
+        return () => controller.abort();
     }, []);
 
     const getTrainingTimeSeconds = (job) => {
@@ -34,22 +36,23 @@ function HomePage() {
         return 0;
     };
 
-    const fetchDashboardData = async () => {
+    const fetchDashboardData = async (signal) => {
         try {
             setLoading(true);
             setError(null);
 
             // Fetch recent datasets
-            const datasetsResponse = await datasetApi.listDatasets({ page: 1, limit: 5, sort_by: 'created_at', order: 'desc' });
-            setRecentDatasets(datasetsResponse.datasets);
+            const datasetsResponse = await datasetApi.listDatasets({ page: 1, limit: 5, sort_by: 'created_at', order: 'desc' }, { signal });
+            const datasetsList = datasetsResponse.datasets || [];
+            setRecentDatasets(datasetsList);
 
             // Calculate aggregate stats
-            const totalDatasets = datasetsResponse.total;
-            const totalImages = datasetsResponse.datasets.reduce((sum, d) => sum + d.total_images, 0);
-            const totalClasses = datasetsResponse.datasets.reduce((sum, d) => sum + d.total_classes, 0);
-            const totalObjects = datasetsResponse.datasets.reduce((sum, d) => sum + d.total_objects, 0);
+            const totalDatasets = datasetsResponse.total || 0;
+            const totalImages = datasetsList.reduce((sum, d) => sum + (d.total_images || 0), 0);
+            const totalClasses = datasetsList.reduce((sum, d) => sum + (d.total_classes || 0), 0);
+            const totalObjects = datasetsList.reduce((sum, d) => sum + (d.total_objects || 0), 0);
 
-            const trainingResponse = await datasetApi.listTrainingJobs();
+            const trainingResponse = await datasetApi.listTrainingJobs(null, { signal });
             const trainingJobs = trainingResponse.jobs || [];
             const totalTrainingTimeSeconds = trainingJobs.reduce((sum, job) => sum + getTrainingTimeSeconds(job), 0);
             const totalTrainingImages = trainingJobs.reduce((sum, job) => sum + getTrainingImages(job), 0);
@@ -63,6 +66,7 @@ function HomePage() {
                 totalTrainingImages,
             });
         } catch (err) {
+            if (err.name === 'CanceledError' || err.name === 'AbortError') return;
             setError(err.response?.data?.detail || 'Failed to load dashboard data');
         } finally {
             setLoading(false);

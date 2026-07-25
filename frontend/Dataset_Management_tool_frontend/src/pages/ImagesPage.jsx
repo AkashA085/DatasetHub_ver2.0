@@ -31,7 +31,11 @@ function ImagesPage() {
         }
     };
 
-    const getImageSrc = (url) => (url?.startsWith('/api') ? url : `/api${url}`);
+    const getImageSrc = (url) => {
+    if (!url) return '';
+    if (url.startsWith('/api') || url.startsWith('/storage')) return url;
+    return `/api${url}`;
+};
 
     return (
         <div className="images-page fade-in">

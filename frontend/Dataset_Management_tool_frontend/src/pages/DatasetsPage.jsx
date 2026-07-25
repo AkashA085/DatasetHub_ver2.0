@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { FiImage, FiLayers, FiCalendar, FiFilter } from 'react-icons/fi';
 import { datasetApi } from '../api/datasetApi';
@@ -18,10 +18,12 @@ function DatasetsPage() {
     const [order, setOrder] = useState(searchParams.get('order') || 'desc');
 
     useEffect(() => {
-        fetchDatasets();
+        const controller = new AbortController();
+        fetchDatasets(controller.signal);
+        return () => controller.abort();
     }, [page, formatFilter, sortBy, order]);
 
-    const fetchDatasets = async () => {
+    const fetchDatasets = async (signal) => {
         try {
             setLoading(true);
             setError(null);
@@ -37,10 +39,11 @@ function DatasetsPage() {
                 params.format_type = formatFilter;
             }
 
-            const response = await datasetApi.listDatasets(params);
-            setDatasets(response.datasets);
-            setTotalPages(response.total_pages);
+            const response = await datasetApi.listDatasets(params, { signal });
+            setDatasets(response.datasets || []);
+            setTotalPages(response.total_pages || 1);
         } catch (err) {
+            if (err.name === 'CanceledError' || err.name === 'AbortError') return;
             setError(err.response?.data?.detail || 'Failed to load datasets');
         } finally {
             setLoading(false);

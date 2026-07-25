@@ -51,7 +51,7 @@ class DatasetValidator:
         all_label_paths_list = []
         for ext in self.label_extensions:
             all_label_paths_list.extend(list(self.labels_dir.rglob(f"*{ext}")))
-            all_label_paths_list.extend(list(self.labels_dir.rglob(f"*{ext.upper()}")))
+        all_label_paths_list.extend(list(self.labels_dir.rglob(f"*{ext.upper()}")))
         all_label_paths = {p.resolve(): p for p in all_label_paths_list}
 
         # Search for classes.txt specifically for metadata
@@ -133,7 +133,9 @@ class DatasetValidator:
 
         missing_label_images_list = []
         orphan_label_files_list = []
+        empty_label_images_list = []
         empty_label_files_list = []
+        # Additional lists already defined above
         corrupted_image_files_list = []
         
         # Mappings for export logic
@@ -174,6 +176,8 @@ class DatasetValidator:
             
             if not objects:
                 empty_label_files_list.append(label_path.name)
+                # Record image as empty label image (has a label file but no objects)
+                empty_label_images_list.append(img_path.name)
             
             for obj in objects:
                 class_ids_found.add(obj.class_id)
@@ -209,6 +213,7 @@ class DatasetValidator:
             corrupted_images=len(corrupted_image_files_list),
             class_ids_found=sorted(list(class_ids_found)),
             missing_label_images=sorted(missing_label_images_list),
+            empty_label_images=sorted(empty_label_images_list),
             orphan_label_files=sorted(orphan_label_files_list),
             empty_label_files=sorted(empty_label_files_list),
             corrupted_image_files=sorted(corrupted_image_files_list)

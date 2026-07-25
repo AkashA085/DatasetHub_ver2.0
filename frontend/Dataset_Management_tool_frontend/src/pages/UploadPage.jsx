@@ -24,14 +24,14 @@ function UploadPage() {
             return;
         }
 
-        // Check file sizes (limit to 100GB each)
-        const maxSize = 100 * 1024 * 1024 * 1024; // 100GB
+        // Check file sizes (limit to 10GB each)
+        const maxSize = 10 * 1024 * 1024 * 1024; // 10GB
         if (imagesFile.size > maxSize) {
-            setError('Images ZIP file is too large. Maximum size is 100GB.');
+            setError('Images ZIP file is too large. Maximum size is 10GB.');
             return;
         }
         if (labelsFile.size > maxSize) {
-            setError('Labels ZIP file is too large. Maximum size is 100GB.');
+            setError('Labels ZIP file is too large. Maximum size is 10GB.');
             return;
         }
 

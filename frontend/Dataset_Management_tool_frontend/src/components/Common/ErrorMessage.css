@@ -3,8 +3,8 @@
     align-items: center;
     gap: var(--spacing-sm);
     padding: var(--spacing-md);
-    background: rgba(var(--error), 0.1);
-    border: 1px solid var(--error);
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
     border-radius: var(--radius-sm);
     margin-bottom: var(--spacing-md);
     animation: slideIn 0.3s ease;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { FiPlay, FiRefreshCw, FiStopCircle } from 'react-icons/fi';
 import { datasetApi } from '../api/datasetApi';
+import API_BASE_URL from '../config';
 import LoadingSpinner from '../components/Common/LoadingSpinner';
 import ErrorMessage from '../components/Common/ErrorMessage';
 import './TrainingPage.css';
@@ -79,33 +80,17 @@ function TrainingPage() {
     const [form, setForm] = useState({
         dataset_id: '',
         model: 'yolov8n.pt',
-        model_architecture: 'YOLOv8',
-        pretrained_weights_used: true,
         epochs: 50,
         batch_size: 16,
         image_size: 640,
         learning_rate: 0.01,
-        optimizer: 'auto',
         device: 'auto',
         val_split: 0.2,
         test_split: 0.1,
-        seed: 42,
         augmentation_enabled: false,
-        augmentation_pipeline_name: 'none',
-        flip_enabled: false,
-        rotation_angle: 0,
-        brightness_range: '0.0-0.0',
-        noise_level: 0,
-        blur_enabled: false,
-        augmented_images_count: 0,
         experiment_name: 'dataset_training',
         run_name: '',
-        mlflow_tracking_uri: '',
-        register_best_model: false,
-        model_version: '',
-        model_stage: 'Staging',
-        model_description: '',
-        patience: 20,
+        patience: 100,
     });
 
     const selectedJob = useMemo(
@@ -178,7 +163,7 @@ function TrainingPage() {
             return;
         }
         // Validate numeric fields
-        const numericFields = ['epochs', 'batch_size', 'image_size', 'learning_rate', 'val_split', 'test_split', 'seed', 'rotation_angle', 'noise_level', 'augmented_images_count'];
+        const numericFields = ['epochs', 'batch_size', 'image_size', 'learning_rate', 'val_split', 'test_split'];
         for (const field of numericFields) {
             if (isNaN(Number(form[field]))) {
                 setError(`${field.replace('_', ' ')} must be a valid number.`);
@@ -192,25 +177,14 @@ function TrainingPage() {
             setNotice('');
             const payload = {
                 ...form,
-                pretrained_weights_used: Boolean(form.pretrained_weights_used),
                 epochs: Number(form.epochs),
                 batch_size: Number(form.batch_size),
                 image_size: Number(form.image_size),
                 learning_rate: Number(form.learning_rate),
                 val_split: Number(form.val_split),
                 test_split: Number(form.test_split),
-                seed: Number(form.seed),
                 augmentation_enabled: Boolean(form.augmentation_enabled),
-                flip_enabled: Boolean(form.flip_enabled),
-                rotation_angle: Number(form.rotation_angle),
-                noise_level: Number(form.noise_level),
-                augmented_images_count: Number(form.augmented_images_count),
-                blur_enabled: Boolean(form.blur_enabled),
-                register_best_model: Boolean(form.register_best_model),
                 run_name: form.run_name || null,
-                mlflow_tracking_uri: form.mlflow_tracking_uri || null,
-                model_version: form.model_version || null,
-                model_description: form.model_description || null,
                 patience: Number(form.patience),
             };
             const started = await datasetApi.startTraining(payload);
@@ -309,28 +283,13 @@ function TrainingPage() {
                         <option value="yolov8n.pt">YOLOv8 Nano (Fast)</option>
                         <option value="yolov8s.pt">YOLOv8 Small</option>
                         <option value="yolov8m.pt">YOLOv8 Medium</option>
+                        <option value="yolo11n.pt">YOLO11 Nano (Fast)</option>
+                        <option value="yolo11s.pt">YOLO11 Small</option>
+                        <option value="yolo11m.pt">YOLO11 Medium</option>
+                        <option value="yolo26s.pt">YOLO26 Small</option>
+                        <option value="yolo26m.pt">YOLO26 Medium</option>
+                        <option value="yolo26l.pt">YOLO26 Large</option>
                     </select>
-
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Model Architecture</label>
-                            <input
-                                type="text"
-                                value={form.model_architecture}
-                                onChange={(e) => setForm((prev) => ({ ...prev, model_architecture: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label>Pretrained Weights Used</label>
-                            <select
-                                value={String(form.pretrained_weights_used)}
-                                onChange={(e) => setForm((prev) => ({ ...prev, pretrained_weights_used: boolFromSelect(e.target.value) }))}
-                            >
-                                <option value="true">True</option>
-                                <option value="false">False</option>
-                            </select>
-                        </div>
-                    </div>
 
                     <div className="training-grid-2">
                         <div>
@@ -368,11 +327,49 @@ function TrainingPage() {
                             />
                         </div>
                         <div>
-                            <label>Seed</label>
+                            <label>
+                                Device
+                                {deviceInfo && (
+                                    <div style={{ fontSize: '0.85em', color: '#28a745', marginTop: '4px', fontWeight: 'bold' }}>
+                                        ✓ {deviceInfo.message}
+                                    </div>
+                                )}
+                            </label>
+                            <select
+                                value={form.device}
+                                onChange={(e) => setForm((prev) => ({ ...prev, device: e.target.value }))}
+                            >
+                                {deviceInfo?.devices?.map((gpu) => (
+                                    <option key={gpu.device_id} value={gpu.device_id}>
+                                        🚀 {gpu.device_name} ({gpu.total_memory_gb}GB)
+                                    </option>
+                                ))}
+                                <option value="0">🚀 GPU 0 (Default)</option>
+                                <option value="cpu" style={{ color: '#d9534f' }}>🐢 CPU (Slow)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="training-grid-2">
+                        <div>
+                            <label>Learning Rate</label>
                             <input
                                 type="number"
-                                value={form.seed}
-                                onChange={(e) => setForm((prev) => ({ ...prev, seed: e.target.value }))}
+                                min="0.000001"
+                                max="1"
+                                step="0.0001"
+                                value={form.learning_rate}
+                                onChange={(e) => setForm((prev) => ({ ...prev, learning_rate: e.target.value }))}
+                            />
+                        </div>
+                        <div>
+                            <label>Patience</label>
+                            <input
+                                type="number"
+                                min="0"
+                                max="1000"
+                                value={form.patience}
+                                onChange={(e) => setForm((prev) => ({ ...prev, patience: e.target.value }))}
                             />
                         </div>
                     </div>
@@ -402,142 +399,17 @@ function TrainingPage() {
                         </div>
                     </div>
 
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Learning Rate</label>
-                            <input
-                                type="number"
-                                min="0.000001"
-                                max="1"
-                                step="0.0001"
-                                value={form.learning_rate}
-                                onChange={(e) => setForm((prev) => ({ ...prev, learning_rate: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label>PATIENCE</label>
-                            <input
-                                type="number"
-                                min="0"
-                                max="1000"
-                                value={form.patience}
-                                onChange={(e) => setForm((prev) => ({ ...prev, patience: e.target.value }))}
-                            />
-                        </div>
-                    </div>
+                    <h4>Augmentation</h4>
+                    <label>Augmentation Enabled</label>
+                    <select
+                        value={String(form.augmentation_enabled)}
+                        onChange={(e) => setForm((prev) => ({ ...prev, augmentation_enabled: boolFromSelect(e.target.value) }))}
+                    >
+                        <option value="false">No</option>
+                        <option value="true">Yes</option>
+                    </select>
 
-                    <div className="training-grid-2">
-                        <div>
-                            <label>
-                                Device (GPU Training)
-                                {deviceInfo && (
-                                    <div style={{ fontSize: '0.85em', color: '#28a745', marginTop: '4px', fontWeight: 'bold' }}>
-                                        ✓ {deviceInfo.message}
-                                    </div>
-                                )}
-                            </label>
-                            <select
-                                value={form.device}
-                                onChange={(e) => setForm((prev) => ({ ...prev, device: e.target.value }))}
-                            >
-                                {deviceInfo?.devices?.map((gpu) => (
-                                    <option key={gpu.device_id} value={gpu.device_id}>
-                                        🚀 {gpu.device_name} ({gpu.total_memory_gb}GB)
-                                    </option>
-                                ))}
-                                <option value="0">🚀 GPU 0 (Default)</option>
-                                <option value="cpu" style={{ color: '#d9534f' }}>🐢 CPU (Very Slow - Not Recommended)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Augmented Images Count</label>
-                            <input
-                                type="number"
-                                min="0"
-                                value={form.augmented_images_count}
-                                onChange={(e) => setForm((prev) => ({ ...prev, augmented_images_count: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-
-                    <h4>Augmentation Tracking</h4>
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Augmentation Enabled</label>
-                            <select
-                                value={String(form.augmentation_enabled)}
-                                onChange={(e) => setForm((prev) => ({ ...prev, augmentation_enabled: boolFromSelect(e.target.value) }))}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Pipeline Name</label>
-                            <input
-                                type="text"
-                                value={form.augmentation_pipeline_name}
-                                onChange={(e) => setForm((prev) => ({ ...prev, augmentation_pipeline_name: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Flip Enabled</label>
-                            <select
-                                value={String(form.flip_enabled)}
-                                onChange={(e) => setForm((prev) => ({ ...prev, flip_enabled: boolFromSelect(e.target.value) }))}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Rotation Angle</label>
-                            <input
-                                type="number"
-                                value={form.rotation_angle}
-                                onChange={(e) => setForm((prev) => ({ ...prev, rotation_angle: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Brightness Range</label>
-                            <input
-                                type="text"
-                                value={form.brightness_range}
-                                onChange={(e) => setForm((prev) => ({ ...prev, brightness_range: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label>Noise Level</label>
-                            <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={form.noise_level}
-                                onChange={(e) => setForm((prev) => ({ ...prev, noise_level: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Blur Enabled</label>
-                            <select
-                                value={String(form.blur_enabled)}
-                                onChange={(e) => setForm((prev) => ({ ...prev, blur_enabled: boolFromSelect(e.target.value) }))}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <h4>MLflow Run</h4>
+                    <h4>MLflow</h4>
                     <label>Experiment Name</label>
                     <input
                         type="text"
@@ -545,68 +417,12 @@ function TrainingPage() {
                         onChange={(e) => setForm((prev) => ({ ...prev, experiment_name: e.target.value }))}
                     />
 
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Run Name (Optional)</label>
-                            <input
-                                type="text"
-                                value={form.run_name}
-                                onChange={(e) => setForm((prev) => ({ ...prev, run_name: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label>Tracking URI (Optional)</label>
-                            <input
-                                type="text"
-                                value={form.mlflow_tracking_uri}
-                                onChange={(e) => setForm((prev) => ({ ...prev, mlflow_tracking_uri: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-
-                    <h4>Model Registry</h4>
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Register Best Model</label>
-                            <select
-                                value={String(form.register_best_model)}
-                                onChange={(e) => setForm((prev) => ({ ...prev, register_best_model: boolFromSelect(e.target.value) }))}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Model Stage</label>
-                            <select
-                                value={form.model_stage}
-                                onChange={(e) => setForm((prev) => ({ ...prev, model_stage: e.target.value }))}
-                            >
-                                <option value="Staging">Staging</option>
-                                <option value="Production">Production</option>
-                                <option value="Archived">Archived</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div className="training-grid-2">
-                        <div>
-                            <label>Model Version (Optional)</label>
-                            <input
-                                type="text"
-                                value={form.model_version}
-                                onChange={(e) => setForm((prev) => ({ ...prev, model_version: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label>Model Description (Optional)</label>
-                            <input
-                                type="text"
-                                value={form.model_description}
-                                onChange={(e) => setForm((prev) => ({ ...prev, model_description: e.target.value }))}
-                            />
-                        </div>
-                    </div>
+                    <label>Run Name (Optional)</label>
+                    <input
+                        type="text"
+                        value={form.run_name}
+                        onChange={(e) => setForm((prev) => ({ ...prev, run_name: e.target.value }))}
+                    />
 
                     <button type="button" className="btn btn-primary wide-btn" onClick={handleStartTraining} disabled={starting}>
                         <FiPlay /> {starting ? 'Starting...' : 'Start Training'}
@@ -703,60 +519,16 @@ function TrainingPage() {
                                 </div>
                             )}
 
-                            {selectedJob.artifacts && (
+                            {selectedJob.artifacts && selectedJob.status === 'completed' && (
                                 <div className="artifact-block">
-                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                        <h4>Artifacts</h4>
-                                        {selectedJob.status === 'completed' && (
-                                            <a
-                                                href={`/api/train/jobs/${selectedJob.job_id}/download`}
-                                                download={`training_${selectedJob.job_id}.zip`}
-                                                className="btn btn-primary small-btn"
-                                                style={{ textDecoration: 'none' }}
-                                            >
-                                                Download Full Training Folder (ZIP)
-                                            </a>
-                                        )}
-                                    </div>
-                                    <p>
-                                        <strong>Run Dir:</strong> {selectedJob.artifacts.run_dir || '-'}
-                                    </p>
-                                    <p>
-                                        <strong>Best Weights:</strong> {selectedJob.artifacts.best_weights || '-'}
-                                        {selectedJob.artifacts.best_weights && selectedJob.status === 'completed' && (
-                                            <>
-                                                <a
-                                                    href={getDownloadUrl(selectedJob.artifacts.best_weights)}
-                                                    download={`best_${selectedJob.job_id}.pt`}
-                                                    className="btn btn-primary small-btn"
-                                                    style={{ marginLeft: '10px', textDecoration: 'none' }}
-                                                >
-                                                    Download
-                                                </a>
-                                                <a
-                                                    href={`/api/train/jobs/${selectedJob.job_id}/download`}
-                                                    download={`full_results_${selectedJob.job_id}.zip`}
-                                                    className="btn btn-success small-btn"
-                                                    style={{ marginLeft: '10px', textDecoration: 'none' }}
-                                                >
-                                                    Download Full Results (Weights, Graphs & Frames)
-                                                </a>
-                                            </>
-                                        )}
-                                    </p>
-                                    <p>
-                                        <strong>Last Weights:</strong> {selectedJob.artifacts.last_weights || '-'}
-                                        {selectedJob.artifacts.last_weights && selectedJob.status === 'completed' && (
-                                            <a
-                                                href={getDownloadUrl(selectedJob.artifacts.last_weights)}
-                                                download={`last_${selectedJob.job_id}.pt`}
-                                                className="btn btn-secondary small-btn"
-                                                style={{ marginLeft: '10px', textDecoration: 'none' }}
-                                            >
-                                                Download
-                                            </a>
-                                        )}
-                                    </p>
+                                    <a
+                                        href={`${API_BASE_URL}/train/jobs/${selectedJob.job_id}/download`}
+                                        download={`training_results_${selectedJob.job_id}.zip`}
+                                        className="btn btn-primary"
+                                        style={{ textDecoration: 'none' }}
+                                    >
+                                        Download Full Results
+                                    </a>
                                 </div>
                             )}
 

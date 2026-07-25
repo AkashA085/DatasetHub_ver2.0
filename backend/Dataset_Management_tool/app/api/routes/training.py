@@ -7,6 +7,7 @@ import random
 import shutil
 import threading
 import traceback
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +56,7 @@ def get_training_cfg(params: Dict[str, Any], dataset_path: str, data_yaml: str) 
         # ── Training — tuned for RTX 5070 Ti ─────────────────────────────────────
         epochs          = params.get("epochs", 100),
         batch           = params.get("batch_size", 16),
-        workers         = 16,
+        workers         = params.get("workers", 0),
         device          = params.get("device", "0"),
         optimizer       = params.get("optimizer", "AdamW"),
         lr0             = params.get("learning_rate", 0.0001),
@@ -67,8 +68,8 @@ def get_training_cfg(params: Dict[str, Any], dataset_path: str, data_yaml: str) 
         cos_lr          = True,
         amp             = True,
         cache           = "disk",
-        patience        = params.get("patience", 20),
-        save_period     = 25,
+        patience        = params.get("patience", 0),
+        save_period     = -1,  # save only best + last (no intermediate checkpoints)
         # ── Loss weights (small fast objects need strong box loss) ────────────────
         box             = 9.5,
         cls             = 0.3,
@@ -80,7 +81,7 @@ def get_training_cfg(params: Dict[str, Any], dataset_path: str, data_yaml: str) 
         project         = str(TRAINING_JOBS_DIR / params.get("job_id", "unknown") / "runs"),
         name            = params.get("run_name", f"exp_{datetime.now().strftime('%Y%m%d_%H%M')}"),
         # ── MLflow ────────────────────────────────────────────────────────────────
-        mlflow_uri      = params.get("mlflow_tracking_uri", "mlruns"),
+        mlflow_uri      = params.get("mlflow_tracking_uri", str(STORAGE_ROOT.parent / "mlruns")),
         mlflow_exp      = params.get("experiment_name", "Drone_vs_Drone_Detection"),
         # ── Jetson Export ─────────────────────────────────────────────────────────
         jetson_format   = "engine",
@@ -207,31 +208,22 @@ def build_val_transform() -> A.Compose:
 #  AUGMENTED DATASET WRITER
 # ══════════════════════════════════════════════════════════════════════════════
 
-def write_augmented_split(
-    src_img_dir : str,
-    src_lbl_dir : str,
-    dst_img_dir : str,
-    dst_lbl_dir : str,
-    multiplier  : int = 4,
-    mode        : str = "train",
-) -> int:
-    transform = build_train_transform() if mode == "train" else build_val_transform()
-    imgs = sorted(Path(src_img_dir).glob("*.*"))
-    Path(dst_img_dir).mkdir(parents=True, exist_ok=True)
-    Path(dst_lbl_dir).mkdir(parents=True, exist_ok=True)
-
-    written = 0
-    for img_path in imgs:
+def _process_single_image(args):
+    img_path, src_lbl_dir, dst_img_dir, dst_lbl_dir, multiplier, mode = args
+    try:
+        import cv2
+        from pathlib import Path
+        import albumentations as A
+        
         lbl_path = Path(src_lbl_dir) / (img_path.stem + ".txt")
         if not lbl_path.exists():
-            continue
+            return 0
 
         image = cv2.imread(str(img_path))
         if image is None:
-            continue
+            return 0
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # parse YOLO labels
         bboxes, classes = [], []
         for line in lbl_path.read_text().strip().splitlines():
             p = line.split()
@@ -240,33 +232,76 @@ def write_augmented_split(
             classes.append(int(p[0]))
             bboxes.append([min(max(float(x), 0.0), 1.0) for x in p[1:5]])
 
-        # always copy original
+        # Rebuild transform in the worker
+        transform = build_train_transform() if mode == "train" else build_val_transform()
         versions = [("orig", image, bboxes, classes)]
         for i in range(multiplier):
             try:
                 aug = transform(image=image, bboxes=bboxes, class_labels=classes)
-                versions.append((f"a{i:02d}", aug["image"],
-                                 aug["bboxes"], aug["class_labels"]))
+                versions.append((f"a{i:02d}", aug["image"], aug["bboxes"], aug["class_labels"]))
             except Exception:
                 pass
 
+        written = 0
         for tag, aug_img, aug_boxes, aug_cls in versions:
-            stem   = f"{img_path.stem}_{tag}"
+            stem = f"{img_path.stem}_{tag}"
             out_im = Path(dst_img_dir) / f"{stem}.jpg"
             out_lb = Path(dst_lbl_dir) / f"{stem}.txt"
-            cv2.imwrite(str(out_im),
-                        cv2.cvtColor(aug_img, cv2.COLOR_RGB2BGR),
-                        [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(str(out_im), cv2.cvtColor(aug_img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
             with open(out_lb, "w") as f:
                 for cls_id, box in zip(aug_cls, aug_boxes):
-                    f.write(f"{cls_id} {box[0]:.6f} {box[1]:.6f} "
-                            f"{box[2]:.6f} {box[3]:.6f}\n")
+                    f.write(f"{cls_id} {box[0]:.6f} {box[1]:.6f} {box[2]:.6f} {box[3]:.6f}\n")
             written += 1
+        return written
+    except Exception:
+        return 0
 
+def write_augmented_split(
+    src_img_dir : str,
+    src_lbl_dir : str,
+    dst_img_dir : str,
+    dst_lbl_dir : str,
+    multiplier  : int = 4,
+    mode        : str = "train",
+    job         : dict = None,
+) -> int:
+    imgs = sorted(Path(src_img_dir).glob("*.*"))
+    Path(dst_img_dir).mkdir(parents=True, exist_ok=True)
+    Path(dst_lbl_dir).mkdir(parents=True, exist_ok=True)
+
+    total_imgs = len(imgs)
+    if total_imgs == 0:
+        return 0
+
+    args_list = [(img, src_lbl_dir, dst_img_dir, dst_lbl_dir, multiplier, mode) for img in imgs]
+    written = 0
+    
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import multiprocessing
+    
+    # Use threads — IO-bound (file copies) and safe after CUDA init (no fork)
+    workers = min(multiprocessing.cpu_count(), 8)
+    
+    if job:
+        _append_log(job, f"Starting parallel augmentation for {mode} split ({total_imgs} images) using {workers} workers...")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_single_image, args): args for args in args_list}
+        for i, future in enumerate(as_completed(futures)):
+            written += future.result()
+            
+            # Log progress every 10%
+            if job and total_imgs > 0 and (i + 1) % max(1, total_imgs // 10) == 0:
+                percent = int(((i + 1) / total_imgs) * 100)
+                _append_log(job, f"Augmentation progress ({mode}): {percent}% completed ({i+1}/{total_imgs} images)")
+
+    if job:
+        _append_log(job, f"Finished augmentation for {mode} split. Created {written} total files.")
+        
     return written
 
 
-def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
+def build_augmented_dataset(cfg: dict, multiplier: int = 4, job: dict = None) -> str:
     root     = Path(cfg["dataset_root"])
     aug_root = root / "augmented"
 
@@ -278,6 +313,7 @@ def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
         dst_lbl_dir = str(aug_root / "train" / "labels"),
         multiplier  = multiplier,
         mode        = "train",
+        job         = job,
     )
     # val/test: copy only
     import os
@@ -306,7 +342,7 @@ def build_augmented_dataset(cfg: dict, multiplier: int = 4) -> str:
 class EarlyStopping:
     def __init__(
         self,
-        patience=20,          # stop after 20 epochs without improvement (default)
+        patience=0,           # 0 disables early stopping (default)
         min_delta=0.001,      # minimum improvement required
         save_path="best_early_stop.pt"
     ):
@@ -329,6 +365,9 @@ class EarlyStopping:
             return False
 
         # Check improvement
+        if current_metric is None:
+            return False
+
         if current_metric > self.best_metric + self.min_delta:
             print(
                 f"Improved: "
@@ -343,6 +382,11 @@ class EarlyStopping:
                 print(f"Best model saved: {self.save_path}")
             except Exception as e:
                 print(f"Failed to save best model: {e}")
+            return False
+        if self.patience <= 0:
+            # Patience <= 0 means no early stopping.
+            return False
+
         else:
             self.no_improve_count += 1
             print(
@@ -377,7 +421,7 @@ class DroneMLflowCallback:
         # losses
         for k, v in trainer.label_loss_items(trainer.tloss, prefix="train").items():
             try: mlflow.log_metric(f"loss/{k}", float(v), step=epoch)
-            except: pass
+            except Exception: pass
         # val metrics
         for k, v in trainer.metrics.items():
             try:
@@ -386,7 +430,7 @@ class DroneMLflowCallback:
                 if "mAP50" in key and float(v) > self.best_map50:
                     self.best_map50 = float(v)
                     mlflow.log_metric("best_mAP50", self.best_map50, step=epoch)
-            except: pass
+            except Exception: pass
         # learning rate
         for i, lr in enumerate(trainer.scheduler.get_last_lr()):
             mlflow.log_metric(f"lr/pg{i}", lr, step=epoch)
@@ -406,7 +450,7 @@ class DroneMLflowCallback:
         # final metrics
         for k, v in trainer.metrics.items():
             try: mlflow.log_metric(f"final/{k.replace('(B)','').strip()}", float(v))
-            except: pass
+            except Exception: pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -422,38 +466,58 @@ def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: 
     active_yaml = cfg["data_yaml"]
     if use_albumentations:
         _append_log(job, f"Building Albumentations dataset (×{aug_mult})…")
-        active_yaml = build_augmented_dataset(cfg, multiplier=aug_mult)
+        active_yaml = build_augmented_dataset(cfg, multiplier=aug_mult, job=job)
     else:
         _append_log(job, "Skipping Albumentations pre-augmentation (using YOLO built-in)")
 
     # ── MLflow ────────────────────────────────────────────────────────────────
-    if existing_mlflow_run is None:
+    mlflow_run = None
+    mlflow_run_context = None
+    mlflow_enabled = False
+    try:
         mlflow.set_tracking_uri(cfg["mlflow_uri"])
         mlflow.set_experiment(cfg["mlflow_exp"])
         mlflow_run_context = mlflow.start_run(run_name=cfg["name"])
-        run = mlflow_run_context.__enter__()
-    else:
-        run = existing_mlflow_run
+        mlflow_run = mlflow_run_context.__enter__()
+        mlflow_enabled = True
+        _append_log(job, f"MLflow run started (experiment='{cfg['mlflow_exp']}', run_id='{mlflow_run.info.run_id}')")
+    except Exception as mlflow_err:
+        _append_log(job, f"MLflow init failed (non-fatal): {mlflow_err}")
 
     try:
-        # log full config
-        loggable = {k: str(v) for k, v in cfg.items()
-                    if not isinstance(v, (list, dict))}
-        loggable["aug_multiplier"]   = str(aug_mult)
-        loggable["use_albumentations"] = str(use_albumentations)
-        loggable["cuda_device"]      = torch.cuda.get_device_name(0) \
-                                       if torch.cuda.is_available() else "cpu"
-        loggable["torch_version"]    = torch.__version__
-        mlflow.log_params(loggable)
-        mlflow.log_artifact(active_yaml, artifact_path="dataset")
+        if mlflow_enabled and mlflow_run:
+            try:
+                loggable = {k: str(v) for k, v in cfg.items()
+                            if not isinstance(v, (list, dict))}
+                loggable["aug_multiplier"]   = str(aug_mult)
+                loggable["use_albumentations"] = str(use_albumentations)
+                loggable["cuda_device"]      = torch.cuda.get_device_name(0) \
+                                               if torch.cuda.is_available() else "cpu"
+                loggable["torch_version"]    = torch.__version__
+                mlflow.log_params(loggable)
+                mlflow.log_artifact(active_yaml, artifact_path="dataset")
+            except Exception as log_err:
+                _append_log(job, f"MLflow log warning (non-fatal): {log_err}")
 
         # ── load model ────────────────────────────────────────────────────────
         model = YOLO(cfg["model"])
 
+
+
+
+
+
+
+
+
+
+
+
         # ── attach MLflow callback ────────────────────────────────────────────
-        cb = DroneMLflowCallback(run, cfg)
-        model.add_callback("on_train_epoch_end", cb.on_train_epoch_end)
-        model.add_callback("on_train_end",       cb.on_train_end)
+        if mlflow_enabled and mlflow_run:
+            cb = DroneMLflowCallback(mlflow_run, cfg)
+            model.add_callback("on_train_epoch_end", cb.on_train_epoch_end)
+            model.add_callback("on_train_end",       cb.on_train_end)
 
         # ── attach Early Stopping callback ────────────────────────────────────
         # Save early stopping weights in the run directory
@@ -462,26 +526,53 @@ def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: 
         early_stop_save_path.parent.mkdir(parents=True, exist_ok=True)
         
         early_stopper = EarlyStopping(
-            patience=cfg.get("patience", 20),
+            patience=cfg.get("patience", 0),
             min_delta=0.001,
             save_path=str(early_stop_save_path)
         )
 
         def on_train_epoch_end_early_stop(trainer):
+            if job and job.get("stop_requested"):
+                print("Stopping YOLO training loop due to user cancellation.")
+                trainer.stop = True
+                return
+
             # Extract mAP50-95 from trainer metrics
             # Note: YOLOv8 uses specific keys in trainer.metrics
             metrics = trainer.metrics
-            # Try multiple common keys for mAP50-95
+            # Try multiple common keys for mAP50-95; stay None if not available yet
             current_map = metrics.get('metrics/mAP50-95(B)')
             if current_map is None:
-                current_map = metrics.get('mAP50-95', 0.0)
+                current_map = metrics.get('mAP50-95')
             
+            # Update job metrics for frontend real-time tracking
+            if job:
+                from app.core.database import SessionLocal
+                if job.get("metrics") is None:
+                    job["metrics"] = {}
+                job["metrics"]["epoch"] = trainer.epoch + 1
+                job["metrics"]["total_epochs"] = trainer.epochs
+                if metrics:
+                    job["metrics"]["mAP50"] = metrics.get('metrics/mAP50(B)', 0.0)
+                    job["metrics"]["mAP50_95"] = current_map
+                    job["metrics"]["precision"] = metrics.get('metrics/precision(B)', 0.0)
+                    job["metrics"]["recall"] = metrics.get('metrics/recall(B)', 0.0)
+                try:
+                    db_session = SessionLocal()
+                    _save_job_to_db(job, db_session)
+                    db_session.close()
+                except Exception:
+                    pass
+
             if early_stopper.step(current_map, trainer.model):
                 trainer.stop = True
 
         model.add_callback("on_train_epoch_end", on_train_epoch_end_early_stop)
 
         # ── YOLO train ────────────────────────────────────────────────────────
+        # Disable YOLO's built-in early stopping when custom EarlyStopping is active
+        yolo_patience = 9999 if cfg.get("patience", 0) > 0 else cfg.get("patience", 9999)
+
         results = model.train(
             data            = active_yaml,
             epochs          = cfg["epochs"],
@@ -503,7 +594,7 @@ def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: 
             cls             = cfg["cls"],
             dfl             = cfg["dfl"],
             multi_scale     = cfg["multi_scale"],
-            patience        = cfg["patience"],
+            patience        = yolo_patience,
             save_period     = cfg["save_period"],
             project         = cfg["project"],
             name            = cfg["name"],
@@ -525,8 +616,11 @@ def advanced_train(cfg: dict = None, use_albumentations: bool = True, aug_mult: 
         )
 
     finally:
-        if existing_mlflow_run is None:
-            mlflow_run_context.__exit__(None, None, None)
+        if mlflow_run is not None:
+            try:
+                mlflow_run_context.__exit__(None, None, None)
+            except Exception:
+                pass
 
     return results
 
@@ -540,6 +634,25 @@ TRAINING_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, Dict[str, Any]] = {}
+_training_threads: Dict[str, threading.Thread] = {}
+_thread_start_times: Dict[str, float] = {}
+_threads_lock = threading.Lock()
+
+
+def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Thread-safe read of a job from _jobs."""
+    with _jobs_lock:
+        return _jobs.get(job_id)
+
+
+def _update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Thread-safe update of a job dict. Returns the updated job or None."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return None
+        job.update(updates)
+        return job
 
 
 class TrainingStartRequest(BaseModel):
@@ -573,7 +686,8 @@ class TrainingStartRequest(BaseModel):
     model_version: Optional[str] = None
     model_stage: str = "Staging"
     model_description: Optional[str] = None
-    patience: int = Field(20, ge=0, le=1000)
+    # Set to 0 to disable early stopping; any positive value enables early‑stop after that many epochs.
+    patience: int = Field(0, ge=0, le=1000)
 
 
 class TrainingJobResponse(BaseModel):
@@ -610,6 +724,38 @@ class DeviceDetectionResponse(BaseModel):
     devices: List[GPUDeviceInfo]
     recommended_device: str  # "auto", "cpu", or GPU ID like "0"
     message: str
+
+
+def _cleanup_dead_threads():
+    """Check running jobs; if a job's thread is dead but the job is still 'running',
+    mark it as failed (the thread crashed silently)."""
+    import traceback
+    now = time.time()
+    with _threads_lock:
+        dead_job_ids = [
+            jid for jid, t in list(_training_threads.items())
+            if not t.is_alive() and now - _thread_start_times.get(jid, now) > 2
+        ]
+        for jid in dead_job_ids:
+            del _training_threads[jid]
+            _thread_start_times.pop(jid, None)
+
+    for jid in dead_job_ids:
+        with _jobs_lock:
+            job = _jobs.get(jid)
+        if job and job.get("status") in ("queued", "preparing", "running"):
+            _update_job(jid, {
+                "status": "failed",
+                "error": "Training thread died unexpectedly (likely CUDA or DataLoader crash). Please check system resources and try again.",
+                "finished_at": datetime.utcnow().isoformat(),
+            })
+            from app.core.database import SessionLocal
+            try:
+                db_session = SessionLocal()
+                _save_job_to_db(job, db_session)
+                db_session.close()
+            except Exception:
+                pass
 
 
 def _append_log(job: Dict[str, Any], message: str) -> None:
@@ -912,16 +1058,13 @@ def _validate_and_setup_gpu(device: str, job: Dict[str, Any]) -> None:
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
             _append_log(job, f"✓✓✓ USING GPU FOR TRAINING ✓✓✓")
-            _append_log(job, f"✓ CUDA Available: {torch.cuda.is_available()}")
-            _append_log(job, f"✓ GPU Device Count: {device_count}")
+            _append_log(job, f"GPU count: {device_count}")
             for i in range(device_count):
                 props = torch.cuda.get_device_properties(i)
                 total_mem = props.total_memory / (1024**3)
                 _append_log(job, f"  GPU {i}: {props.name} ({total_mem:.1f}GB)")
-            torch.cuda.empty_cache()
-            _append_log(job, "✓ GPU memory cleared and ready for training")
         else:
-            _append_log(job, f"⚠️  GPU requested (device={device}) but CUDA not available - falling back to CPU (VERY SLOW)")
+            _append_log(job, "⚠️  CUDA not available – falling back to CPU (training will be slow)")
     except Exception as e:
         _append_log(job, f"⚠️  GPU validation warning: {str(e)}")
 
@@ -978,18 +1121,13 @@ def _prepare_yolo_dataset(
     db: Session,
     job: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Prepare YOLO dataset from uploaded real data only.
-    
-    CRITICAL: This function MUST use only images with labels from uploaded datasets.
-    No mock data, no fallback data - ONLY real uploaded labeled images.
-    """
+    """Prepare YOLO dataset from uploaded data, including images without labels by creating empty placeholder label files.""",
+  
     _append_log(job, f"Preparing dataset from uploaded data for dataset_id={dataset_id}")
     
-    # Query ONLY required columns for images that have labels (real labeled data) to save RAM
-    # has_label field was set during upload based on matching label files
+    # Query ONLY required columns for images to save RAM
     images = db.query(Image.file_path, Image.file_name).filter(
-        Image.dataset_id == dataset_id,
-        Image.has_label == True  # CRITICAL: Only real labeled images
+        Image.dataset_id == dataset_id
     ).all()
     
     if not images:
@@ -997,7 +1135,7 @@ def _prepare_yolo_dataset(
         _append_log(job, f"ERROR: No labeled images found. Total images: {all_images_count}")
         raise ValueError(f"No labeled images found for dataset {dataset_id}. Cannot train without labels.")
 
-    _append_log(job, f"Found {len(images)} labeled images for dataset")
+    _append_log(job, f"Found {len(images)} images for dataset")
     
     # Validate all images and labels exist and are accessible
     pairs = []
@@ -1031,19 +1169,13 @@ def _prepare_yolo_dataset(
             # Create label path with .txt extension (using stem to preserve name without extension)
             label_path = Path(*label_parts).parent / (Path(img_path).stem + ".txt")
             
-            # Validate label file exists and is readable
-            if not label_path.exists():
-                invalid_images.append((img.file_name, f"Label file not found: {label_path}"))
-                continue
+            # Ensure label directory exists
+            label_path.parent.mkdir(parents=True, exist_ok=True)
             
-            if not label_path.is_file():
-                invalid_images.append((img.file_name, f"Label path is not a file: {label_path}"))
-                continue
-            
-            # Verify label file is not empty (must have annotations)
-            if label_path.stat().st_size == 0:
-                invalid_images.append((img.file_name, f"Label file is empty: {label_path}"))
-                continue
+            # If label file missing or empty, create empty placeholder for negative sample
+            if not label_path.exists() or label_path.stat().st_size == 0:
+                label_path.touch()
+                _append_log(job, f"INFO: Created/Ensured empty label file for image {img.file_name}")
             
             # All checks passed - add to pairs
             pairs.append((img_path, label_path, img.file_name))
@@ -1099,19 +1231,25 @@ def _prepare_yolo_dataset(
         """Copy image/label pairs to training directory."""
         copy_count = 0
         import os
+        import shutil
         for img_path, lbl_path, file_name in split_pairs:
             try:
-                # Symlink image
+                # Prefer symlink to save disk space; fall back to hard-copy
                 dest_img = dataset_dir / split_name / "images" / file_name
                 if not dest_img.exists():
-                    os.symlink(img_path, dest_img)
+                    try:
+                        os.symlink(img_path, dest_img)
+                    except OSError:
+                        shutil.copy2(img_path, dest_img)
                 
-                # Symlink label with correct name
+                # Symlink/copy label with correct name
                 label_name = f"{Path(file_name).stem}.txt"
                 dest_lbl = dataset_dir / split_name / "labels" / label_name
                 if not dest_lbl.exists():
-                    os.symlink(lbl_path, dest_lbl)
-                
+                    try:
+                        os.symlink(lbl_path, dest_lbl)
+                    except OSError:
+                        shutil.copy2(lbl_path, dest_lbl)
                 copy_count += 1
             except Exception as e:
                 _append_log(job, f"ERROR linking {file_name}: {str(e)}")
@@ -1184,15 +1322,19 @@ def _run_training(job_id: str) -> None:
             return
  
         if job.get("stop_requested"):
-            job["status"] = "cancelled"
-            job["finished_at"] = datetime.utcnow().isoformat()
+            _update_job(job_id, {
+                "status": "cancelled",
+                "finished_at": datetime.utcnow().isoformat(),
+            })
             _append_log(job, "Training job cancelled before start.")
             _save_job_to_db(job, db)
             return
  
-        job["status"] = "preparing"
         training_start_dt = datetime.utcnow()
-        job["started_at"] = training_start_dt.isoformat()
+        _update_job(job_id, {
+            "status": "preparing",
+            "started_at": training_start_dt.isoformat(),
+        })
         _append_log(job, "Starting training job.")
 
         dataset = db.query(Dataset).filter(Dataset.id == job["dataset_id"]).first()
@@ -1205,6 +1347,15 @@ def _run_training(job_id: str) -> None:
             db=db,
             job=job,
         )
+        # Check for cancellation before starting heavy training step
+        if job.get("stop_requested"):
+            _update_job(job_id, {
+                "status": "cancelled",
+                "finished_at": datetime.utcnow().isoformat(),
+            })
+            _append_log(job, "Training cancelled before execution.")
+            _save_job_to_db(job, db)
+            return
 
         # Save job to DB after dataset preparation
         _save_job_to_db(job, db)
@@ -1233,42 +1384,30 @@ def _run_training(job_id: str) -> None:
         experiment_name = job["params"].get("experiment_name", "dataset_training")
         mlflow_tracking_uri = job["params"].get("mlflow_tracking_uri")
         if not mlflow_tracking_uri:
-            # Try to use PostgreSQL if available, otherwise fallback to SQLite
-            db_url = os.getenv("DATABASE_URL")
-            if db_url:
-                # Replace the database name at the end of the URL with 'mlflow'
-                mlflow_tracking_uri = db_url.rsplit("/", 1)[0] + "/mlflow"
-            else:
-                mlflow_db_path = STORAGE_ROOT / "mlflow.db"
-                mlflow_tracking_uri = f"sqlite:///{mlflow_db_path}"
+            mlflow_tracking_uri = str(STORAGE_ROOT.parent / "mlruns")
 
         mlflow = None
         mlflow_client = None
         mlflow_active = False
         mlflow_run_id = None
         try:
-            import mlflow  # type: ignore
-            from mlflow.tracking import MlflowClient  # type: ignore
-            if mlflow_tracking_uri:
-                mlflow.set_tracking_uri(mlflow_tracking_uri)
-            mlflow.set_experiment(experiment_name)
-            mlflow.start_run(run_name=run_name, nested=False)
-            mlflow_active = True
-            mlflow_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else None
-            mlflow_client = MlflowClient()
-            job["mlflow"] = {
-                "enabled": True,
-                "tracking_uri": mlflow.get_tracking_uri(),
-                "experiment_name": experiment_name,
-                "run_id": mlflow_run_id or "",
-            }
-            _append_log(job, f"MLflow run started (experiment='{experiment_name}', run_id='{mlflow_run_id}')")
-        except Exception as mlflow_init_error:
-            job["mlflow"] = {
-                "enabled": False,
-                "error": f"{type(mlflow_init_error).__name__}: {mlflow_init_error}",
-            }
-            _append_log(job, f"MLflow disabled: {job['mlflow']['error']}")
+            from ultralytics import YOLO, settings
+            settings.update({"mlflow": False})
+        except Exception as e:
+            _append_log(job, f"Ultralytics import failed: {e}. Attempting pip install...")
+            # Attempt on‑the‑fly installation (best‑effort, may require network)
+            try:
+                import subprocess, sys
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics"])
+                from ultralytics import YOLO, settings
+                settings.update({"mlflow": False})
+                _append_log(job, "Ultralytics installed successfully at runtime.")
+            except Exception as install_err:
+                raise RuntimeError(
+                    f"Ultralytics is not installed and automatic installation failed: {install_err}. "
+                    "Please add 'ultralytics' to backend requirements and rebuild the image."
+                ) from install_err
+        mlflow_active = False
 
         requested_device = job["params"].get("device")
         resolved_device = _resolve_device(requested_device)
@@ -1314,25 +1453,18 @@ def _run_training(job_id: str) -> None:
         if mlflow_active:
             _log_params_chunked(mlflow, _to_mlflow_params(tracking_params))
 
-        job["status"] = "running"
+        _update_job(job_id, {"status": "running"})
         if job.get("stop_requested"):
-            job["status"] = "cancelled"
-            job["finished_at"] = datetime.utcnow().isoformat()
+            _update_job(job_id, {
+                "status": "cancelled",
+                "finished_at": datetime.utcnow().isoformat(),
+            })
             _append_log(job, "Training job cancelled before execution.")
             _save_job_to_db(job, db)
             return
 
         _append_log(job, "Running advanced YOLO training with Albumentations and MLflow.")
         _save_job_to_db(job, db)
-
-        try:
-             from ultralytics import YOLO, settings
-             settings.update({"mlflow": False})
-        except Exception as e:
-            raise RuntimeError(
-                "Ultralytics is not installed in backend environment. "
-                "Install with: pip install ultralytics"
-            ) from e
 
         # Generate CFG for advanced training
         cfg = get_training_cfg(
@@ -1357,10 +1489,7 @@ def _run_training(job_id: str) -> None:
             except Exception as e:
                 _append_log(job, f"  GPU memory clear warning: {str(e)}")
 
-        # Get existing MLflow run if active
         existing_mlflow_run = None
-        if mlflow_active and mlflow.active_run():
-            existing_mlflow_run = mlflow.active_run()
 
         # capture stdout/stderr from training so we can surface it
         # in the job log and make it visible to the frontend.
@@ -1372,13 +1501,12 @@ def _run_training(job_id: str) -> None:
                 self.orig = orig_stream
 
             def write(self, s: str) -> None:
-                # send non-empty lines to logs, skip progress bar updates to prevent bloat
-                if s and "\r" not in s:
-                    for line in s.splitlines():
+                # Capture all output, including progress bars. Replace carriage returns with newlines.
+                if s:
+                    cleaned = s.replace('\r', '\n')
+                    for line in cleaned.splitlines():
                         if line.strip():
-                            # skip extremely long lines just in case
-                            if len(line) < 500:
-                                _append_log(self.job, line)
+                            _append_log(self.job, line)
                 try:
                     self.orig.write(s)
                 except Exception:
@@ -1408,11 +1536,15 @@ def _run_training(job_id: str) -> None:
             # restore original streams in all cases
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
+            _append_log(job, "Stdout/err streams restored after training.")
 
+        # After training, check if cancellation was requested during training
         if job.get("stop_requested"):
-            job["status"] = "cancelled"
-            job["finished_at"] = datetime.utcnow().isoformat()
-            _append_log(job, "Training stopped by user.")
+            _update_job(job_id, {
+                "status": "cancelled",
+                "finished_at": datetime.utcnow().isoformat(),
+            })
+            _append_log(job, "Training cancelled after execution.")
             _save_job_to_db(job, db)
             return
 
@@ -1508,10 +1640,13 @@ def _run_training(job_id: str) -> None:
                 }
                 try:
                     from ultralytics import YOLO
+                    registered_name = f"{dataset_name}_detector".replace("-", "_")
                     if best_pt.exists():
                         trained_model = YOLO(str(best_pt))
                         mlflow.pytorch.log_model(trained_model.model, artifact_path="model")
-                        registered_name = f"{dataset_name}_detector".replace("-", "_")
+                    else:
+                        _append_log(job, "WARNING: best.pt not found, skipping model registration.")
+                        raise FileNotFoundError("best.pt not found for MLflow model registration")
                     model_uri = f"runs:/{mlflow_run_id}/model"
                     model_version = mlflow.register_model(model_uri=model_uri, name=registered_name)
                     if job["params"].get("model_description"):
@@ -1567,7 +1702,7 @@ def _run_training(job_id: str) -> None:
             job["mlflow"]["training_start_time"] = job["started_at"]
             job["mlflow"]["training_end_time"] = job["finished_at"]
             job["mlflow"]["total_training_time"] = total_training_time
-        job["status"] = "completed"
+        _update_job(job_id, {"status": "completed"})
         _append_log(job, "Training completed successfully.")
 
     except Exception as e:
@@ -1577,8 +1712,8 @@ def _run_training(job_id: str) -> None:
                 mlflow.end_run(status="FAILED")
         except Exception:
             pass
-        job["status"] = "failed"
         job["error"] = f"{type(e).__name__}: {str(e)}"
+        _update_job(job_id, {"status": "failed", "error": job["error"]})
         _append_log(job, f"Training failed: {job['error']}")
         _append_log(job, traceback.format_exc())
     finally:
@@ -1702,12 +1837,18 @@ async def start_training(request: TrainingStartRequest, db: Session = Depends(ge
 
     t = threading.Thread(target=_run_training, args=(job_id,), daemon=True)
     t.start()
+    with _threads_lock:
+        _training_threads[job_id] = t
+        _thread_start_times[job_id] = time.time()
 
     return TrainingJobResponse(**job)
 
 
 @router.get("/jobs", response_model=TrainingJobListResponse)
 async def list_training_jobs(dataset_id: Optional[str] = None, db: Session = Depends(get_db)):
+    # Clean up any threads that died silently
+    _cleanup_dead_threads()
+
     # Get all jobs from database (most recent first)
     query = db.query(TrainingJob)
     if dataset_id:
@@ -1739,6 +1880,9 @@ async def list_training_jobs(dataset_id: Optional[str] = None, db: Session = Dep
 
 @router.get("/jobs/{job_id}", response_model=TrainingJobResponse)
 async def get_training_job(job_id: str, db: Session = Depends(get_db)):
+    # Clean up any threads that died silently
+    _cleanup_dead_threads()
+
     # Try to get from database first (persistent)
     job_record = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
     if job_record:
@@ -1814,9 +1958,22 @@ async def delete_training_job(job_id: str, db: Session = Depends(get_db)):
         if job:
             if job["status"] not in {"completed", "failed", "cancelled"}:
                 job["stop_requested"] = True
-                job["status"] = "cancelling"
-                _append_log(job, "Stop requested by user before delete.")
+                job["status"] = "cancelled"
+                job["finished_at"] = datetime.utcnow().isoformat()
+                _append_log(job, "Job cancellation requested by user before delete. Deleting job.")
                 _save_job_to_db(job, db)
+                # Remove job from in‑memory dict (already popped)
+                # Delete job files on disk
+                job_dir = TRAINING_JOBS_DIR / job_id
+                if job_dir.exists():
+                    import shutil
+                    shutil.rmtree(job_dir)
+                # Delete persistent DB record if exists
+                job_record = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+                if job_record:
+                    db.delete(job_record)
+                    db.commit()
+                return TrainingJobResponse(**job)
             return TrainingJobResponse(**job)
 
     job_record = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
@@ -1844,13 +2001,15 @@ async def delete_training_job(job_id: str, db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/stop", response_model=TrainingJobResponse)
 async def stop_training_job(job_id: str, db: Session = Depends(get_db)):
+    _cleanup_dead_threads()
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job:
             if job["status"] not in {"completed", "failed", "cancelled"}:
                 job["stop_requested"] = True
-                job["status"] = "cancelling"
-                _append_log(job, "Stop requested by user.")
+                job["status"] = "cancelled"
+                job["finished_at"] = datetime.utcnow().isoformat()
+                _append_log(job, "Training stopped by user.")
                 _save_job_to_db(job, db)
             return TrainingJobResponse(**job)
 
@@ -1904,7 +2063,8 @@ def find_latest_weights(dataset_id: str) -> Optional[Path]:
         if not meta_path.exists():
             continue
         try:
-            m = json.load(open(meta_path, "r", encoding="utf-8"))
+            with open(meta_path, "r", encoding="utf-8") as f:
+                m = json.load(f)
         except Exception:
             continue
         if m.get("dataset_id") == dataset_id and weight_file.exists():
@@ -1978,11 +2138,29 @@ async def predict_image(
             tmp.write_bytes(contents)
             temp_path = tmp
         elif image_url:
-            # Validate URL
+            # Validate URL — block SSRF
             try:
                 parsed = urlparse(image_url)
                 if not parsed.scheme or not parsed.netloc:
                     raise ValueError("Invalid URL")
+                if parsed.scheme not in ("http", "https"):
+                    raise ValueError("Only http/https URLs are allowed")
+                import ipaddress
+                hostname = parsed.hostname or ""
+                if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+                    raise ValueError("Internal URLs are not allowed")
+                try:
+                    ip = ipaddress.ip_address(hostname)
+                    if ip.is_private or ip.is_loopback or ip.is_link_local:
+                        raise ValueError("Private/internal IPs are not allowed")
+                except ValueError as e:
+                    if "not allowed" in str(e):
+                        raise
+                    pass  # hostname is a domain name, not an IP — OK
+            except ValueError as e:
+                if "not allowed" in str(e):
+                    raise HTTPException(status_code=400, detail=f"URL rejected: {e}")
+                raise HTTPException(status_code=400, detail="Invalid image_url")
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid image_url")
             # download
