@@ -31,16 +31,16 @@
 }
 
 .model-panel {
-    background: #f7f8fb;
-    border: 1px solid #e2e5ee;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--glass-border);
     border-radius: 12px;
     padding: 12px;
-    color: #1d2433;
+    color: var(--text-primary);
 }
 
 .panel-block {
-    background: #fff;
-    border: 1px solid #e7eaf2;
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border);
     border-radius: 10px;
     padding: 12px;
     margin-bottom: 10px;
@@ -49,7 +49,7 @@
 .panel-block h3 {
     font-size: 16px;
     margin-bottom: 8px;
-    color: #1f2532;
+    color: var(--text-primary);
 }
 
 .sample-grid {
@@ -62,7 +62,7 @@
     border: 2px solid transparent;
     border-radius: 8px;
     padding: 0;
-    background: #eceff7;
+    background: var(--bg-tertiary);
     cursor: pointer;
     overflow: hidden;
     aspect-ratio: 1;
@@ -96,8 +96,8 @@
 }
 
 .model-canvas-panel {
-    background: #fff;
-    border: 1px solid #dfe4f2;
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border);
     border-radius: 12px;
     padding: 12px;
     min-height: 680px;
@@ -108,7 +108,7 @@
     position: relative;
     width: 100%;
     min-height: 620px;
-    border: 1px solid #d7dcef;
+    border: 1px solid var(--glass-border);
     border-radius: 10px;
     overflow: hidden;
     background: #1562e8;
@@ -201,10 +201,10 @@
 .class-chip {
     padding: 4px 8px;
     border-radius: 999px;
-    background: #ece9ff;
-    color: #5c38db;
+    background: rgba(102, 126, 234, 0.12);
+    color: var(--primary);
     font-size: 12px;
-    border: 1px solid #d7d0ff;
+    border: 1px solid rgba(102, 126, 234, 0.25);
 }
 
 @media (max-width: 1400px) {
