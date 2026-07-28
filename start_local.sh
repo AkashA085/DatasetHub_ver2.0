@@ -12,7 +12,7 @@ cleanup() {
     echo "All services stopped."
     exit 0
 }
-trap cleanup SIGINT SIGTERM EXIT
+trap cleanup SIGINT SIGTERM
 
 # ── PostgreSQL ──────────────────────────────────────────────
 docker start local-postgres 2>/dev/null || docker run -d \
@@ -80,3 +80,5 @@ echo "  tail -f /tmp/backend.log"
 echo "  tail -f /tmp/frontend.log"
 echo ""
 echo "Press Ctrl+C to stop all services."
+
+wait

@@ -1,9 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
-import { FiHome, FiDatabase, FiUpload, FiZap, FiCpu, FiActivity } from 'react-icons/fi';
+import { FiHome, FiDatabase, FiUpload, FiZap, FiCpu, FiActivity, FiSun, FiMoon } from 'react-icons/fi';
+import { useTheme } from '../../context/ThemeContext.jsx';
+import logoImg from '../../assets/FWD_only_logo.png';
 import './Layout.css';
 
 function Layout({ children }) {
     const location = useLocation();
+    const { theme, toggleTheme } = useTheme();
 
     const navItems = [
         { path: '/', icon: FiHome, label: 'Dashboard' },
@@ -19,7 +22,16 @@ function Layout({ children }) {
             <aside className="sidebar glass">
                 <div className="sidebar-header">
                     <h1 className="logo">
-                        <img src="/FWD_only_logo.png" alt="FWD" className="logo-img" />
+                        <img
+                            src={logoImg}
+                            alt="FWD"
+                            className="logo-img"
+                            onError={(e) => {
+                                e.target.style.display = 'none';
+                                e.target.nextSibling.style.display = 'flex';
+                            }}
+                        />
+                        <span className="logo-icon" style={{ display: 'none' }}>DH</span>
                         <span className="logo-text">DatasetHub</span>
                     </h1>
                 </div>
@@ -45,6 +57,19 @@ function Layout({ children }) {
                 </nav>
 
                 <div className="sidebar-footer">
+                    <button className="theme-toggle" onClick={toggleTheme}>
+                        {theme === 'light' ? (
+                            <>
+                                <FiMoon className="theme-toggle-icon" />
+                                <span className="nav-label">Dark Mode</span>
+                            </>
+                        ) : (
+                            <>
+                                <FiSun className="theme-toggle-icon" />
+                                <span className="nav-label">Light Mode</span>
+                            </>
+                        )}
+                    </button>
                     <p className="text-sm text-secondary">
                         Dataset Management v1.0
                     </p>

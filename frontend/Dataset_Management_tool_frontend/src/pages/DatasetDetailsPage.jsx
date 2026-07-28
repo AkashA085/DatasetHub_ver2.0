@@ -6,6 +6,7 @@ import { Bar, Pie } from 'react-chartjs-2';
 import { datasetApi } from '../api/datasetApi';
 import LoadingSpinner from '../components/Common/LoadingSpinner';
 import ErrorMessage from '../components/Common/ErrorMessage';
+import { useTheme } from '../context/ThemeContext.jsx';
 import './DatasetDetailsPage.css';
 
 // Register Chart.js components
@@ -42,6 +43,7 @@ const cornersToYolo = (left, top, right, bottom) => {
 
 function DatasetDetailsPage() {
     const { id } = useParams();
+    const { theme } = useTheme();
     const [dataset, setDataset] = useState(null);
     const [images, setImages] = useState([]);
     const [failedImageIds, setFailedImageIds] = useState(new Set());
@@ -431,12 +433,16 @@ const getImageSrc = (url) => {
         );
     }
 
+    if (!dataset) {
+        return <LoadingSpinner message="Loading dataset details..." />;
+    }
+
     // Prepare chart data
     const classDistributionData = {
-        labels: dataset.class_distribution.map(cd => `Class ${cd.class_id}`),
+        labels: (dataset.class_distribution || []).map(cd => `Class ${cd.class_id}`),
         datasets: [{
             label: 'Object Count',
-            data: dataset.class_distribution.map(cd => cd.object_count),
+            data: (dataset.class_distribution || []).map(cd => cd.object_count),
             backgroundColor: [
                 'rgba(102, 126, 234, 0.8)',
                 'rgba(118, 75, 162, 0.8)',
@@ -507,24 +513,28 @@ const getImageSrc = (url) => {
         }]
     };
 
+    const isDark = theme === 'dark';
+    const chartTextColor = isDark ? '#94a3b8' : '#22365f';
+    const chartGridColor = isDark ? 'rgba(148, 163, 184, 0.1)' : 'rgba(34, 54, 95, 0.1)';
+
     const chartOptions = {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
             legend: {
                 labels: {
-                    color: '#22365f',
+                    color: chartTextColor,
                 }
             }
         },
         scales: {
             y: {
-                ticks: { color: '#39517c' },
-                grid: { color: 'rgba(34, 54, 95, 0.1)' }
+                ticks: { color: chartTextColor },
+                grid: { color: chartGridColor }
             },
             x: {
-                ticks: { color: '#39517c' },
-                grid: { color: 'rgba(34, 54, 95, 0.1)' }
+                ticks: { color: chartTextColor },
+                grid: { color: chartGridColor }
             }
         }
     };

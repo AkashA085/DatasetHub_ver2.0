@@ -195,7 +195,7 @@ pkill -f "vite.*--host"
 ## 5. Directory Structure
 
 ```
-MODEL_TRAINIG_AGENTS/
+MODEL_TRAINIG WEBSITE_FINAL/
 ├── start_local.sh                    # All-in-one startup script
 ├── run_backend.sh                    # Backend-only startup
 ├── run_frontend.sh                   # Frontend-only startup
