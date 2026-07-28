@@ -132,6 +132,9 @@ def _resolve_storage_file(file_path: str) -> Path | None:
             return candidate
     return None
 
+from .train_endpoint import router as train_router
+app.include_router(train_router, prefix="/api/v1", tags=["Training"])
+app.include_router(training.router, prefix="/api/v1", tags=["Training"])
 
 @app.get("/storage/{file_path:path}")
 async def serve_storage_file(file_path: str):
@@ -151,7 +154,6 @@ app.include_router(labeling.router, prefix="/api/v1", tags=["Labeling"])
 from .train_endpoint import router as train_router
 app.include_router(train_router, prefix="/api/v1", tags=["Training"])
 app.include_router(training.router, prefix="/api/v1", tags=["Training"])
-
 
 @app.get("/health")
 async def health():
